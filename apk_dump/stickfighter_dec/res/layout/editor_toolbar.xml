@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout android:gravity="center_vertical" android:orientation="horizontal" android:layout_width="wrap_content" android:layout_height="wrap_content"
+  xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto">
+    <android.support.design.widget.FloatingActionButton android:id="@id/MoveEditToolbarImageView" android:layout_marginLeft="0.0dip" android:layout_marginTop="0.0dip" android:layout_marginRight="6.0dip" android:layout_marginBottom="0.0dip" android:src="@drawable/ic_action_drag_open_white24dp" app:elevation="0.0dip" app:borderWidth="0.0dip" style="@style/EditorFloatingActionButton" />
+    <RelativeLayout android:id="@id/saveFrameButtonContainer" android:layout_width="wrap_content" android:layout_height="wrap_content">
+        <ProgressBar android:id="@id/saveFrameProgressBar" android:visibility="invisible" android:layout_width="@dimen/editor_mini_fab_progress_bar" android:layout_height="@dimen/editor_mini_fab_progress_bar" android:layout_marginLeft="0.0dip" android:indeterminate="true" />
+        <android.support.design.widget.FloatingActionButton android:id="@id/SaveFrameButton" android:layout_marginLeft="0.0dip" android:layout_marginTop="0.0dip" android:layout_marginRight="6.0dip" android:layout_marginBottom="0.0dip" android:src="@drawable/ic_save_white18dp" android:layout_alignRight="@id/saveFrameProgressBar" android:layout_centerVertical="true" app:elevation="0.0dip" app:borderWidth="0.0dip" style="@style/EditorMiniFloatingActionButton" />
+    </RelativeLayout>
+    <RelativeLayout android:id="@id/previousFrameButtonContainer" android:layout_width="wrap_content" android:layout_height="wrap_content">
+        <ProgressBar android:id="@id/previousFrameProgressBar" android:visibility="invisible" android:layout_width="@dimen/editor_mini_fab_progress_bar" android:layout_height="@dimen/editor_mini_fab_progress_bar" android:layout_marginLeft="0.0dip" android:indeterminate="true" />
+        <android.support.design.widget.FloatingActionButton android:id="@id/PreviousFrameButton" android:layout_marginLeft="0.0dip" android:layout_marginTop="0.0dip" android:layout_marginRight="6.0dip" android:layout_marginBottom="0.0dip" android:src="@drawable/ic_action_arrow_back_18dp" android:layout_alignRight="@id/previousFrameProgressBar" android:layout_centerVertical="true" app:elevation="0.0dip" app:borderWidth="0.0dip" style="@style/EditorMiniFloatingActionButton" />
+    </RelativeLayout>
+    <android.support.design.widget.FloatingActionButton android:id="@id/AddAnimationObjectButton" android:layout_marginLeft="6.0dip" android:layout_marginTop="0.0dip" android:layout_marginRight="0.0dip" android:layout_marginBottom="0.0dip" android:src="@drawable/ic_add_white_24dp" app:elevation="0.0dip" app:borderWidth="0.0dip" style="@style/EditorMiniFloatingActionButton" />
+    <RelativeLayout android:layout_width="wrap_content" android:layout_height="wrap_content">
+        <android.support.design.widget.FloatingActionButton android:id="@id/ChangeActionModeButton" android:layout_marginLeft="12.0dip" android:layout_marginTop="0.0dip" android:layout_marginRight="0.0dip" android:layout_marginBottom="0.0dip" android:tint="@color/white" app:elevation="0.0dip" app:borderWidth="0.0dip" style="@style/EditorMiniFloatingActionButton" />
+        <Spinner android:id="@id/actionModeSpinner" android:background="@null" android:layout_width="1.0dip" android:layout_height="1.0dip" android:layout_centerInParent="true" />
+    </RelativeLayout>
+    <RelativeLayout android:id="@id/nextFrameButtonContainer" android:layout_width="wrap_content" android:layout_height="wrap_content">
+        <ProgressBar android:id="@id/nextFrameProgressBar" android:visibility="invisible" android:layout_width="@dimen/editor_mini_fab_progress_bar" android:layout_height="@dimen/editor_mini_fab_progress_bar" android:layout_marginLeft="6.0dip" android:indeterminate="true" />
+        <android.support.design.widget.FloatingActionButton android:id="@id/NextFrameButton" android:layout_marginLeft="0.0dip" android:layout_marginTop="0.0dip" android:layout_marginRight="6.0dip" android:layout_marginBottom="0.0dip" android:src="@drawable/ic_action_arrow_forward_18dp" android:layout_alignRight="@id/nextFrameProgressBar" android:layout_centerVertical="true" app:elevation="0.0dip" app:borderWidth="0.0dip" style="@style/EditorMiniFloatingActionButton" />
+    </RelativeLayout>
+</LinearLayout>

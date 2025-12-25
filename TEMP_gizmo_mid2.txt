@@ -1,0 +1,90 @@
+      final curW = _tx(bw, Offset(b.pivot.x, b.pivot.y));
+      // Target world pivot scaled about center
+      final v = curW - _lassoCenterWorld!;
+      final tgtW = _lassoCenterWorld! + Offset(v.dx * factor, v.dy * factor);
+      final deltaW = tgtW - curW;
+      if (deltaW.distance < 1e-6) return;
+      // Parent world matrix
+      vm.Matrix4 parentW;
+      if (b.parentId != null) {
+        final pb = bonesById[b.parentId]!;
+        parentW = instWorld * SkeletonUtil.worldOf(pb, pose, bonesById, cache);
+      } else {
+        parentW = instWorld;
+      }
+      final invParent = vm.Matrix4.inverted(parentW);
+      final dv = invParent.transform3(vm.Vector3(deltaW.dx, deltaW.dy, 0));
+
+      final tr = newTracks[bid] ?? const TrackTransform();
+      final pos = List<KeyF<Vec2>>.from(tr.pos);
+      final i = pos.indexWhere((k)=> k.t==frame);
+      final cur = i>=0 ? pos[i].v : const Vec2(0,0);
+      final next = Vec2(cur.x + dv.x, cur.y + dv.y);
+      final kv = KeyF<Vec2>(frame, next);
+      if (i>=0) pos[i]=kv; else if (widget.autoKey) pos.add(kv);
+      newTracks[bid] = TrackTransform(pos: pos, rotDeg: tr.rotDeg, scale: tr.scale);
+    }
+    for (final bid in _lassoSelection) { scaleBone(bid); }
+    widget.onChange(inst.copyWith(boneTracks: newTracks));
+  }
+
+  // ---------------- helpers ----------------
+
+  String? _hitTestPoleHandle(Offset pos, Instance inst, Model model) {
+    final bid = widget.selectedBoneId;
+    if (bid == null) return null;
+    final parentId = _parentIdOf(bid, model);
+    if (parentId == null) return null;
+    final centerWorld = _poleWorldPos(inst, model, bid);
+    if (centerWorld == null) return null;
+    final center = _worldToScreen(centerWorld);
+    final s = _poleSizePix();
+    final rect = Rect.fromCenter(center: center, width: s, height: s);
+    return rect.inflate(6).contains(pos) ? bid : null;
+  }
+
+  String? _hitTestBone(Offset pos, Instance inst, Model model) {
+    final bones = model.bones;
+    final byId = {for (final b in bones) b.id: b};
+    final instWorld = _instanceWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+    final pose = _poseOf(inst, widget.t, interpolate: widget.sequence.setting.interpolate);
+    final cache = <String, vm.Matrix4>{};
+    const double tolerance = 24.0; // pixels (more forgiving for touch)
+
+    for (final b in bones) {
+      final m = instWorld * SkeletonUtil.worldOf(b, pose, byId, cache);
+      final pivotW = _tx(m, Offset(b.pivot.x, b.pivot.y));
+      final pivotS = _worldToScreen(pivotW);
+      // End: use child pivot if exists, else a default direction (bind offset or +Y)
+      Offset endW;
+      final child = bones.firstWhere((x) => x.parentId == b.id, orElse: () => const Bone(id: '', parentId: null, pivot: Vec2(0,0), bind: Transform2D()));
+      if (child.id.isNotEmpty) {
+        final cm = instWorld * SkeletonUtil.worldOf(child, pose, byId, cache);
+        endW = _tx(cm, Offset(child.pivot.x, child.pivot.y));
+      } else {
+        final tipLocal = Offset(b.pivot.x, b.pivot.y + 50);
+        endW = _tx(m, tipLocal);
+      }
+      final endS = _worldToScreen(endW);
+      // Distance to segment
+      final d = _distPtSeg(pos, pivotS, endS);
+      if (d <= tolerance) return b.id;
+      // Pivot proximity
+      if ((pos - pivotS).distance <= tolerance) return b.id;
+    }
+    return null;
+  }
+
+  bool _hitTestInstanceBounds(Offset posS, Instance inst, Model model) {
+    final bones = {for (final b in model.bones) b.id: b};
+    final instW = _instanceWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+    final pose = _poseOf(inst, widget.t, interpolate: widget.sequence.setting.interpolate);
+    final cache = <String, vm.Matrix4>{};
+    Rect? bnd;
+    ui.Offset addPt(ui.Offset w) {
+      final s = _worldToScreen(w);
+      bnd = bnd == null ? Rect.fromLTWH(s.dx, s.dy, 0, 0) : bnd!.expandToInclude(Rect.fromLTWH(s.dx, s.dy, 0, 0));
+      return s;
+    }
+    for (final a in model.attachments) {
+      final b = bones[a.boneId]; if (b == null) continue;

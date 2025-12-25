@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout android:layout_width="fill_parent" android:layout_height="wrap_content"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <LinearLayout android:orientation="vertical" android:layout_width="280.0dip" android:layout_height="wrap_content">
+        <TextView android:textSize="20.0sp" android:textStyle="normal" android:textColor="@color/text_primary" android:layout_width="fill_parent" android:layout_height="wrap_content" android:layout_margin="16.0dip" android:layout_marginBottom="12.0dip" android:text="@string/enter_custom_figure_name" />
+        <EditText android:textSize="16.0sp" android:textColor="@color/text_primary" android:id="@id/customFigureNameEditText" android:layout_width="fill_parent" android:layout_height="wrap_content" android:layout_margin="16.0dip" android:hint="@string/hint_custom_figure_name" android:maxLines="1" android:lines="1" android:singleLine="true" android:maxLength="40" android:inputType="textCapSentences" android:imeOptions="actionGo" android:imeActionLabel="@string/create" />
+        <RelativeLayout android:paddingBottom="4.0dip" android:layout_width="fill_parent" android:layout_height="wrap_content">
+            <Button android:textSize="14.0sp" android:textColor="@color/accent" android:gravity="center" android:id="@id/okButton" android:background="?selectableItemBackground" android:padding="8.0dip" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="0.0dip" android:layout_marginRight="16.0dip" android:minWidth="48.0dip" android:text="@string/create" android:layout_alignParentRight="true" android:textAllCaps="true" />
+            <Button android:textSize="14.0sp" android:textColor="@color/accent" android:gravity="center" android:id="@id/cancelButton" android:background="?selectableItemBackground" android:padding="8.0dip" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="0.0dip" android:layout_marginRight="16.0dip" android:minWidth="48.0dip" android:minHeight="48.0dip" android:text="@string/cancel" android:layout_toLeftOf="@id/okButton" android:textAllCaps="true" />
+        </RelativeLayout>
+    </LinearLayout>
+</FrameLayout>

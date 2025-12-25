@@ -1,0 +1,120 @@
+    // IK end-effector drag
+    if (_dragIkBoneId != null) {
+      if (widget.stickMode) return; // Stick Fighter 모드: IK 비활성화
+      final world = (e.position - widget.viewportOffset) / widget.viewportScale;
+      final updated = _applyTwoBoneIk(inst, model, _dragIkBoneId!, world);
+      if (updated != null) widget.onChange(updated);
+      return;
+    }
+
+    // Base rotate drag
+    if (_dragBaseRotate) {
+      _dragPointerCurrent = e.position;
+      final instW = _instanceWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+      final pivotWorld = _tx(instW, Offset(inst.pivot.x, inst.pivot.y));
+      final world = (e.position - widget.viewportOffset) / widget.viewportScale;
+      final v = world - pivotWorld;
+      if (v.distance < 1e-6) return;
+      final ang = math.atan2(v.dy, v.dx);
+      final parentW = _parentWorldAtStart ?? vm.Matrix4.identity();
+      final parentY = _angleOfYAxis(parentW);
+      double localDeg = _radToDeg(ang - parentY);
+      if (widget.angleSnap) {
+        localDeg = (localDeg / 15.0).round() * 15.0;
+      }
+      final frame = widget.t.round();
+      final bt = inst.baseTrack ?? const TrackTransform();
+      final rot = List<KeyF<double>>.from(bt.rotDeg);
+      final i = rot.indexWhere((k) => k.t == frame);
+      final kv = KeyF<double>(frame, localDeg);
+      if (i >= 0) {
+        rot[i] = kv;
+      } else if (widget.autoKey) {
+        rot.add(kv);
+      }
+      final updated = inst.copyWith(baseTrack: TrackTransform(pos: bt.pos, rotDeg: rot, scale: bt.scale));
+      widget.onChange(updated);
+      return;
+    }
+
+    // Bone rotate drag
+    if (_dragRotBoneId != null) {
+      final bid = _dragRotBoneId!;
+      final bones = {for (final b in model.bones) b.id: b};
+      final b = bones[bid];
+      if (b == null) return;
+      final instWorld = _instanceWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+      final pose = _poseOf(inst, widget.t, interpolate: widget.sequence.setting.interpolate);
+      final cache = <String, vm.Matrix4>{};
+      final boneW = instWorld * SkeletonUtil.worldOf(b, pose, bones, cache);
+      final parentW = () {
+        if (b.parentId != null) {
+          final pb = bones[b.parentId]!;
+          return instWorld * SkeletonUtil.worldOf(pb, pose, bones, cache);
+        }
+        return instWorld;
+      }();
+      final pivotWorld = _tx(boneW, Offset(b.pivot.x, b.pivot.y));
+      final world = (e.position - widget.viewportOffset) / widget.viewportScale;
+      final v = world - pivotWorld;
+      if (v.distance < 1e-6) return;
+      final ang = math.atan2(v.dy, v.dx);
+      final parentY = _angleOfYAxis(parentW);
+      double localDeg = _radToDeg(ang - parentY);
+      if (widget.angleSnap) {
+        localDeg = (localDeg / 15.0).round() * 15.0;
+      }
+
+      final frame = widget.t.round();
+      final newTracks = Map<String, TrackTransform>.from(inst.boneTracks);
+      final tr = newTracks[bid] ?? const TrackTransform();
+      final rot = List<KeyF<double>>.from(tr.rotDeg);
+      final i = rot.indexWhere((k) => k.t == frame);
+      final kv = KeyF<double>(frame, localDeg);
+      if (i >= 0) {
+        rot[i] = kv;
+      } else if (widget.autoKey) {
+        rot.add(kv);
+      }
+      newTracks[bid] = TrackTransform(pos: tr.pos, rotDeg: rot, scale: tr.scale);
+      widget.onChange(inst.copyWith(boneTracks: newTracks));
+      return;
+    }
+
+    // Pole vector drag
+    if (_dragPoleBoneId != null) {
+      final bid = _dragPoleBoneId!;
+      // Update pole vector local position from pointer
+      final parentId = _parentIdOf(bid, model);
+      if (parentId == null) return;
+      final instWorld = _instanceWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+      final byId = {for (final b in model.bones) b.id: b};
+      final cache = <String, vm.Matrix4>{};
+      final parent = byId[parentId]!;
+      final parentWorld = instWorld * SkeletonUtil.worldOf(parent, _poseOf(inst, widget.t, interpolate: widget.sequence.setting.interpolate), byId, cache);
+
+      // Screen -> world
+      final world = (e.position - widget.viewportOffset) / widget.viewportScale;
+      // World -> parent-local
+      final inv = vm.Matrix4.inverted(parentWorld);
+      final pv = inv.transform3(vm.Vector3(world.dx, world.dy, 0));
+      final newLocal = Vec2(pv.x, pv.y);
+
+      final m = Map<String, Vec2>.from(inst.ikPoles);
+      m[bid] = newLocal;
+      final updated = inst.copyWith(ikPoles: m);
+      widget.onChange(updated);
+      return;
+    }
+  }
+
+  void _onPointerUp(PointerEvent e) {
+    if (widget.tool == 'lasso') {
+      if (_lassoScale) {
+        widget.onEditEnd?.call('Lasso Scale');
+      } else if (_lassoRotate) {
+        widget.onEditEnd?.call('Lasso Rotate');
+      } else if (_lassoMove) {
+        widget.onEditEnd?.call('Lasso Move');
+      } else if (_lassoDrawing) {
+        _finalizeLassoSelection();

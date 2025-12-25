@@ -1,0 +1,180 @@
+  bool showOnion = true;
+  // Optional end-cap editor dock
+  bool showEndCaps = true;
+  bool _linkLR = true; // Apply L/R together
+  bool _mirrorXForLR = true; // Mirror X when applying to counterpart
+  String? selectedId;
+  String _tool = 'smart'; // smart | move | rotate | scale | ik | lasso
+  bool boneMode = false;
+  String? selectedBoneId;
+  final UndoStack _undo = UndoStack();
+  bool autoKey = true;
+  Ticker? _ticker;
+  Duration _lastTick = Duration.zero;
+  double _frameAcc = 0.0;
+  Timer? _periodicAutoSave;
+  bool snapToFrames = true;
+  bool angleSnap = true; // 15-degree snap for rotate tools
+  // Stick Fighter workflow toggle
+  bool stickMode = true;
+  // Coalesced interaction state
+  bool _coalescing = false;
+  Sequence? _seqBefore;
+
+  @override
+  void initState() {
+    super.initState();
+    seq = widget.sequence;
+    // 편집 시작 시 인스턴스가 하나라도 있으면 자동 선택해 조작 가능하게 함
+    if (seq.instances.isNotEmpty) {
+      selectedId = seq.instances.first.id;
+    }
+    _ticker = Ticker(_onTick);
+    WidgetsBinding.instance.addObserver(this);
+    _periodicAutoSave = Timer.periodic(const Duration(seconds: 15), (_) => _autoSaveNow(reason: 'periodic'));
+    _ensureToolsOverlay();
+  }
+  
+  // Adaptive actions for narrow/wide layouts
+  List<Widget> _buildNarrowActions(BuildContext context) {
+    return [
+      _BouncyIcon(tooltip: '처음으로', icon: Icons.skip_previous, onTap: () => setState(() => curT = 1)),
+      _BouncyIcon(tooltip: '이전 프레임', icon: Icons.chevron_left, onTap: _prevFrame),
+      _BouncyIcon(tooltip: '다음 프레임', icon: Icons.chevron_right, onTap: _nextFrame),
+      PopupMenuButton<_MenuAction>(
+        tooltip: '더보기',
+        onSelected: _handleMenuAction,
+        itemBuilder: (_) => _menuItems(),
+      ),
+    ];
+  }
+
+  List<Widget> _buildWideActions(BuildContext context) {
+    return [
+      _BouncyIcon(tooltip: '키에 맞춰 길이 조절', icon: Icons.straighten, onTap: _fitLengthToKeys),
+      _BouncyIcon(tooltip: '총 프레임 설정', icon: Icons.format_list_numbered, onTap: _promptSetTotalFrames),
+      _BouncyIcon(
+        tooltip: stickMode ? '스틱 파이터 모드: 켬' : '스틱 파이터 모드: 끔',
+        onTap: _toggleStickMode,
+        icon: stickMode ? Icons.sports_kabaddi : Icons.sports_kabaddi_outlined,
+      ),
+      _BouncyIcon(
+        tooltip: seq.setting.interpolate ? '보간: 켬' : '보간: 끔',
+        onTap: () {
+          final newSetting = seq.setting.copyWith(interpolate: !seq.setting.interpolate);
+          _commitInstances(seq.instances, 'Toggle Interpolate', settingOverride: newSetting);
+        },
+        icon: seq.setting.interpolate ? Icons.animation : Icons.animation_outlined,
+      ),
+      _BouncyIcon(tooltip: '프레임 삽입', icon: Icons.add_box, onTap: _insertFrames),
+      _BouncyIcon(tooltip: '프레임 삭제', icon: Icons.indeterminate_check_box, onTap: _deleteFrames),
+      _BouncyIcon(tooltip: '홀드(노출) 프레임', icon: Icons.av_timer, onTap: _holdFrames),
+      _BouncyIcon(tooltip: '처음으로', icon: Icons.skip_previous, onTap: () => setState(() => curT = 1)),
+      _BouncyIcon(tooltip: '이전 프레임', icon: Icons.chevron_left, onTap: _prevFrame),
+      _BouncyIcon(tooltip: '다음 프레임', icon: Icons.chevron_right, onTap: _nextFrame),
+      _BouncyIcon(
+        tooltip: snapToFrames ? '프레임 스냅: 켬' : '프레임 스냅: 끔',
+        onTap: () => setState(() => snapToFrames = !snapToFrames),
+        icon: snapToFrames ? Icons.grid_on : Icons.grid_off,
+      ),
+      _BouncyIcon(
+        tooltip: showHierarchy ? '계층 숨기기' : '계층 표시',
+        onTap: () => setState(() => showHierarchy = !showHierarchy),
+        icon: showHierarchy ? Icons.account_tree : Icons.account_tree_outlined,
+      ),
+      _BouncyIcon(
+        tooltip: showOnion ? '어니언 스킨 숨기기' : '어니언 스킨',
+        onTap: () => setState(() => showOnion = !showOnion),
+        icon: showOnion ? Icons.layers : Icons.layers_outlined,
+      ),
+      // Bone 모드 토글/드롭다운 제거: Stick Fighter UX에 맞게 단순화
+      
+      _BouncyIcon(tooltip: 'PNG 시퀀스 내보내기', onTap: exporting ? null : _exportPng, icon: Icons.image_outlined),
+      _BouncyIcon(tooltip: '애니메이션 내보내기 (.sma)', onTap: _exportSma, icon: Icons.ios_share),
+      _BouncyIcon(tooltip: _undo.canUndo ? 'Undo' : 'Undo (disabled)', onTap: _undo.canUndo ? () { setState(() => _undo.undo()); } : null, icon: Icons.undo),
+      _BouncyIcon(tooltip: _undo.canRedo ? 'Redo' : 'Redo (disabled)', onTap: _undo.canRedo ? () { setState(() => _undo.redo()); } : null, icon: Icons.redo),
+      _BouncyIcon(tooltip: '스틱맨 추가', onTap: _addStickFighter, icon: Icons.accessibility_new),
+      _BouncyIcon(tooltip: '좌↔우 포즈 미러', onTap: _mirrorPose, icon: Icons.flip),
+      _BouncyIcon(tooltip: angleSnap ? '각도 스냅: 켬' : '각도 스냅: 끔', onTap: () => setState(() => angleSnap = !angleSnap), icon: Icons.straighten),
+      _BouncyIcon(tooltip: '미리보기 열기', onTap: _openPreview, icon: Icons.slideshow),
+    ];
+  }
+
+  List<PopupMenuEntry<_MenuAction>> _menuItems() {
+    return [
+      const PopupMenuItem(value: _MenuAction.fit, child: Text('키에 맞춰 길이 조절')),
+      const PopupMenuItem(value: _MenuAction.setLen, child: Text('총 프레임 설정')),
+      const PopupMenuDivider(),
+      PopupMenuItem(value: _MenuAction.stickMode, child: Text(stickMode ? '스틱 파이터 모드: 켬' : '스틱 파이터 모드: 끔')),
+      const PopupMenuItem(value: _MenuAction.stickProfile, child: Text('스틱 파이터 프로필(길이/머리/두께)...')),
+      PopupMenuItem(value: _MenuAction.interpolate, child: Text(seq.setting.interpolate ? '보간: 켬' : '보간: 끔')),
+      const PopupMenuItem(value: _MenuAction.insert, child: Text('프레임 삽입')),
+      const PopupMenuItem(value: _MenuAction.delete, child: Text('프레임 삭제')),
+      const PopupMenuItem(value: _MenuAction.hold, child: Text('홀드(노출) 프레임')),
+      const PopupMenuItem(value: _MenuAction.dupNext, child: Text('다음 프레임으로 복제')),
+      const PopupMenuDivider(),
+      PopupMenuItem(value: _MenuAction.snap, child: Text(snapToFrames ? 'Snap: ON' : 'Snap: OFF')),
+      PopupMenuItem(value: _MenuAction.angleSnap, child: Text(angleSnap ? 'Angle Snap 15°: ON' : 'Angle Snap 15°: OFF')),
+      PopupMenuItem(value: _MenuAction.hold, child: Text(angleSnap ? 'Angle Snap 15°: ON' : 'Angle Snap 15°: OFF')),
+      PopupMenuItem(value: _MenuAction.hierarchy, child: Text(showHierarchy ? 'Hide Hierarchy' : 'Show Hierarchy')),
+      PopupMenuItem(value: _MenuAction.onion, child: Text(showOnion ? 'Hide Onion Skin' : 'Onion Skin')),
+      const PopupMenuDivider(),
+      const PopupMenuItem(value: _MenuAction.keyEasing, child: Text('키 이징...')),
+      const PopupMenuItem(value: _MenuAction.poses, child: Text('포즈 프리셋 적용...')),
+      const PopupMenuItem(value: _MenuAction.style, child: Text('피겨 스타일...')),
+      const PopupMenuItem(value: _MenuAction.audio, child: Text('오디오 트랙...')),
+      const PopupMenuDivider(),
+      
+      const PopupMenuItem(value: _MenuAction.exportPng, child: Text('PNG 시퀀스 내보내기')),
+      const PopupMenuItem(value: _MenuAction.exportMp4, child: Text('비디오 내보내기 (MP4)')),
+      const PopupMenuItem(value: _MenuAction.exportSma, child: Text('애니메이션 내보내기 (.sma)')),
+      const PopupMenuDivider(),
+      const PopupMenuItem(value: _MenuAction.undo, child: Text('Undo')),
+      const PopupMenuItem(value: _MenuAction.redo, child: Text('Redo')),
+      const PopupMenuItem(value: _MenuAction.mirror, child: Text('Mirror Pose L↔R')),
+      const PopupMenuItem(value: _MenuAction.addStick, child: Text('Add Stickman')),
+      const PopupMenuItem(value: _MenuAction.preview, child: Text('Open Preview')),
+    ];
+  }
+
+  void _handleMenuAction(_MenuAction action) {
+    switch (action) {
+      case _MenuAction.fit:
+        _fitLengthToKeys();
+        break;
+      case _MenuAction.setLen:
+        _promptSetTotalFrames();
+        break;
+      case _MenuAction.stickMode:
+        _toggleStickMode();
+        break;
+      case _MenuAction.stickProfile:
+        _openStickProfileSheet();
+        break;
+      case _MenuAction.interpolate:
+        final newSetting = seq.setting.copyWith(interpolate: !seq.setting.interpolate);
+        _commitInstances(seq.instances, 'Toggle Interpolate', settingOverride: newSetting);
+        break;
+      case _MenuAction.insert:
+        _insertFrames();
+        break;
+      case _MenuAction.delete:
+        _deleteFrames();
+        break;
+      case _MenuAction.hold:
+        _holdFrames();
+        break;
+      case _MenuAction.dupNext:
+        _duplicateKeysToNext();
+        break;
+      case _MenuAction.snap:
+        setState(() => snapToFrames = !snapToFrames);
+        break;
+      case _MenuAction.angleSnap:
+        setState(() => angleSnap = !angleSnap);
+        break;
+      // Reuse 'hold' menu slot above for Angle Snap toggle label only; real toggle here would require new enum.
+      case _MenuAction.hierarchy:
+        {
+          final narrow = MediaQuery.of(context).size.width < 600;
+          if (narrow) {

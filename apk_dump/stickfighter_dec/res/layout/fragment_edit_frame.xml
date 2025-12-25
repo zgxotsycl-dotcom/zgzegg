@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout android:id="@id/FrameEditorLayout" android:layout_width="fill_parent" android:layout_height="fill_parent"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <View android:id="@id/backgroundCoverup" android:background="#ffaaaaaa" android:visibility="invisible" android:layout_width="fill_parent" android:layout_height="fill_parent" />
+    <RelativeLayout android:id="@id/bottomCacheImageContainer" android:background="#ff888888" android:paddingLeft="0.5dip" android:paddingTop="0.5dip" android:paddingRight="1.5dip" android:paddingBottom="1.5dip" android:visibility="invisible" android:layout_width="fill_parent" android:layout_height="fill_parent">
+        <ImageView android:id="@id/bottomCacheImageView" android:layout_width="fill_parent" android:layout_height="fill_parent" android:scaleType="centerInside" android:layout_centerInParent="true" android:contentDescription="@null" />
+    </RelativeLayout>
+    <RelativeLayout android:id="@id/topCacheImageContainer" android:background="#ff888888" android:paddingLeft="0.5dip" android:paddingTop="0.5dip" android:paddingRight="1.5dip" android:paddingBottom="1.5dip" android:visibility="invisible" android:layout_width="fill_parent" android:layout_height="fill_parent">
+        <ImageView android:id="@id/topCacheImageView" android:layout_width="fill_parent" android:layout_height="fill_parent" android:scaleType="centerInside" android:layout_centerInParent="true" android:contentDescription="@null" />
+    </RelativeLayout>
+    <com.tweber.stickfighter.views.EditorToolbar android:id="@id/EditFrameToolbar" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginLeft="20.0dip" android:layout_marginTop="52.0dip" />
+    <ImageButton android:id="@id/DeleteAreaView" android:background="@null" android:padding="4.0dip" android:layout_width="48.0dip" android:layout_height="48.0dip" android:src="@drawable/ic_action_delete_black48dp" android:scaleType="centerInside" android:tint="#fff44336" android:layout_alignParentRight="true" android:layout_alignParentBottom="true" android:contentDescription="@string/delete" android:alpha="0.8" />
+    <RelativeLayout android:id="@id/saveProgressBar" android:background="#33000000" android:visibility="gone" android:layout_width="fill_parent" android:layout_height="fill_parent">
+        <ProgressBar android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_centerInParent="true" style="?android:attr/progressBarStyleLarge" />
+    </RelativeLayout>
+</RelativeLayout>

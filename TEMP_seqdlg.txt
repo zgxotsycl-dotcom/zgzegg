@@ -1,0 +1,104 @@
+                        }
+                      }, child: const Text('이미지 선택')),
+                      const SizedBox(width: 8),
+                      TextButton(onPressed: (){ setState2((){ bgPath = null; }); }, child: const Text('지우기')),
+                    ]),
+                    const SizedBox(height: 16),
+                    const Text('히트 반경 (px)'),
+                    Row(children: [
+                      Expanded(child: Slider(min: 8, max: 64, divisions: 56, value: tol, label: tol.toStringAsFixed(0), onChanged: (v){ setState2(()=> tol = v); })),
+                      SizedBox(width: 48, child: Text(tol.toStringAsFixed(0), textAlign: TextAlign.right)),
+                    ]),
+                    const SizedBox(height: 12),
+                    const Text('프리뷰 품질 (0.5 ~ 1.0)'),
+                    Row(children: [
+                      Expanded(child: Slider(min: 0.5, max: 1.0, divisions: 5, value: q, label: q.toStringAsFixed(2), onChanged: (v){ setState2(()=> q = double.parse(v.toStringAsFixed(2))); })),
+                      SizedBox(width: 48, child: Text(q.toStringAsFixed(2), textAlign: TextAlign.right)),
+                    ]),
+                    const SizedBox(height: 12),
+                    Row(children:[
+                      Switch(value: lockLen, onChanged: (v){ setState2(()=> lockLen = v); }),
+                      const SizedBox(width: 8),
+                      const Expanded(child: Text('세그먼트 길이 고정(편집)')),
+                    ]),
+                    const SizedBox(height: 8),
+                    Row(children:[
+                      Switch(value: writeAnchor, onChanged: (v){ setState2(()=> writeAnchor = v); }),
+                      const SizedBox(width: 8),
+                      const Expanded(child: Text('편집 시 앵커 기록')),
+                    ]),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: ()=> Navigator.pop(ctx2), child: const Text('취소')),
+                FilledButton(onPressed: (){
+                  final color = _parseColor(colorCtl.text, s0.backgroundColor);
+                  final newSetting = s0.copyWith(
+                    backgroundColor: color,
+                    backgroundImage: bgPath,
+                    hitTolerancePx: tol,
+                    previewDownscale: q,
+                    enforceLengthLock: lockLen,
+                    anchorWriteOnEdit: writeAnchor,
+                  );
+                  _commitInstances(seq.instances, 'Sequence Settings', settingOverride: newSetting);
+                  Navigator.pop(ctx2);
+                }, child: const Text('적용')),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  String _formatEta(DateTime stageStart, double progress) {
+    if (progress <= 0.0) return '';
+    final elapsed = DateTime.now().difference(stageStart).inMilliseconds;
+    if (elapsed <= 0) return '';
+    final totalMs = (elapsed / (progress <= 0 ? 1e-6 : progress)).clamp(0, 12 * 3600 * 1000).toInt();
+    final remainMs = (totalMs - elapsed).clamp(0, 12 * 3600 * 1000).toInt();
+    final secs = (remainMs / 1000).ceil();
+    final m = (secs ~/ 60).toString().padLeft(2, '0');
+    final s = (secs % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  Future<void> _showExportActionsSheet(File file) async {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    await showModalBottomSheet(
+      context: context,
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('갤러리에 저장'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  try {
+                    final res = await SaverGallery.saveFile(
+                      filePath: file.path,
+                      fileName: '${seq.name}.mp4',
+                      androidRelativePath: 'Movies/BOKU Animator',
+                      skipIfExists: false,
+                    );
+                    final ok = res.isSuccess == true;
+                    if (ok == true) {
+                      messenger.showSnackBar(const SnackBar(content: Text('갤러리에 저장되었습니다.')));
+                    } else {
+                      messenger.showSnackBar(SnackBar(content: Text('갤러리 저장 실패: $res')));
+                    }
+                  } catch (e) {
+                    messenger.showSnackBar(SnackBar(content: Text('갤러리 저장 실패: $e')));
+                  }
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.ios_share),
+                title: const Text('공유하기'),
+                onTap: () async {

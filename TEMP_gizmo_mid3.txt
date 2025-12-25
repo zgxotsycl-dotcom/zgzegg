@@ -1,0 +1,200 @@
+      final m = instW * SkeletonUtil.worldOf(b, pose, bones, cache);
+      switch (a.type) {
+        case PrimType.line:
+          addPt(_tx(m, a.a.o)); addPt(_tx(m, a.b.o));
+          break;
+        case PrimType.rect:
+          addPt(_tx(m, a.a.o)); addPt(_tx(m, ui.Offset(a.a.x + a.b.x, a.a.y + a.b.y)));
+          break;
+        case PrimType.circle:
+          final c = _tx(m, a.a.o);
+          addPt(c + ui.Offset(a.b.x, a.b.y)); addPt(c - ui.Offset(a.b.x, a.b.y));
+          break;
+        case PrimType.path:
+          if (a.points != null) {
+            for (final pt in a.points!) { addPt(_tx(m, pt.o)); }
+          }
+          break;
+        case PrimType.image:
+          addPt(_tx(m, a.a.o)); addPt(_tx(m, ui.Offset(a.a.x + a.b.x, a.a.y + a.b.y)));
+          break;
+      }
+    }
+    if (bnd == null) return false;
+    return bnd!.inflate(24).contains(posS);
+  }
+
+  String? _hitTestEndEffector(Offset pos, Instance inst, Model model) {
+    final sel = widget.selectedBoneId;
+    if (sel == null) return null;
+    final chain = _findTwoBoneChain(model, sel);
+    if (chain == null) return null;
+    final lower = chain.item2;
+
+    final instWorld = _instanceWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+    final pose = _poseOf(inst, widget.t, interpolate: widget.sequence.setting.interpolate);
+    final bones = {for (final b in model.bones) b.id: b};
+    final cache = <String, vm.Matrix4>{};
+    final lw = instWorld * SkeletonUtil.worldOf(lower, pose, bones, cache);
+    // Prefer child's pivot as tip if exists
+    final child = model.bones.firstWhere(
+      (x) => x.parentId == lower.id,
+      orElse: () => const Bone(id: '', parentId: null, pivot: Vec2(0,0), bind: Transform2D()),
+    );
+    Offset tip;
+    if (child.id.isNotEmpty) {
+      final cw = instWorld * SkeletonUtil.worldOf(child, pose, bones, cache);
+      tip = _tx(cw, Offset(child.pivot.x, child.pivot.y));
+    } else {
+      tip = _tx(lw, Offset(0, _boneLength(model, lower.id)));
+    }
+    final tipScreen = _worldToScreen(tip);
+    const double handleRadius = 12.0;
+    if ((pos - tipScreen).distance <= handleRadius + 6.0) return lower.id;
+    return null;
+  }
+
+  String? _hitTestEndEffectorGlobal(Offset pos, Instance inst, Model model) {
+    final bones = {for (final b in model.bones) b.id: b};
+    final instWorld = _instanceWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+    final pose = _poseOf(inst, widget.t, interpolate: widget.sequence.setting.interpolate);
+    final cache = <String, vm.Matrix4>{};
+
+    double bestD = double.infinity;
+    String? bestLower;
+
+    for (final b in model.bones) {
+      final chain = _findTwoBoneChain(model, b.id);
+      if (chain == null) continue;
+      final lower = chain.item2;
+      // Tip world
+      final lw = instWorld * SkeletonUtil.worldOf(lower, pose, bones, cache);
+      final child = model.bones.firstWhere(
+        (x) => x.parentId == lower.id,
+        orElse: () => const Bone(id: '', parentId: null, pivot: Vec2(0,0), bind: Transform2D()),
+      );
+      Offset tip;
+      if (child.id.isNotEmpty) {
+        final cw = instWorld * SkeletonUtil.worldOf(child, pose, bones, cache);
+        tip = _tx(cw, Offset(child.pivot.x, child.pivot.y));
+      } else {
+        tip = _tx(lw, Offset(0, _boneLength(model, lower.id)));
+      }
+      final d = (pos - tip).distance;
+      if (d < bestD && d <= 18.0) {
+        bestD = d; bestLower = lower.id;
+      }
+    }
+    return bestLower;
+  }
+
+  Offset? _poleWorldPos(Instance inst, Model model, String boneId) {
+    final bones = {for (final b in model.bones) b.id: b};
+    final parentId = _parentIdOf(boneId, model);
+    if (parentId == null) return null;
+    final parent = bones[parentId]!;
+    final instWorld = _instanceWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+    final pose = _poseOf(inst, widget.t, interpolate: widget.sequence.setting.interpolate);
+    final cache = <String, vm.Matrix4>{};
+    final parentWorld = instWorld * SkeletonUtil.worldOf(parent, pose, bones, cache);
+    final local = inst.ikPoles[boneId] ?? const Vec2(0, 0);
+    return _tx(parentWorld, local.o);
+  }
+
+  String? _parentIdOf(String boneId, Model model) {
+    final b = model.bones.firstWhere((x) => x.id == boneId, orElse: () => const Bone(id: '', parentId: null, pivot: Vec2(0,0), bind: Transform2D()));
+    return b.id.isEmpty ? null : b.parentId;
+  }
+
+  double _poleSizePix() {
+    // Base size scales with zoom for readability
+    const double base = 12.0;
+    final s = (base * (1.0 + (1.0 / widget.viewportScale - 1.0) * 0.2)).clamp(10.0, 22.0);
+    return s;
+  }
+
+  // ------------- IK core -------------
+
+  // Returns updated instance or null if chain invalid
+  Instance? _applyTwoBoneIk(Instance inst, Model model, String lowerId, Offset targetWorld) {
+    final chain = _findTwoBoneChain(model, lowerId);
+    if (chain == null) return null;
+    final upper = chain.item1; // parent joint
+    final lower = chain.item2; // child joint
+
+    final bones = {for (final b in model.bones) b.id: b};
+    final instWorld = _instanceWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+    final pose = _poseOf(inst, widget.t, interpolate: widget.sequence.setting.interpolate);
+    final cache = <String, vm.Matrix4>{};
+
+    final upperWorld = instWorld * SkeletonUtil.worldOf(upper, pose, bones, cache);
+    final startJoint = _tx(upperWorld, Offset(upper.pivot.x, upper.pivot.y));
+
+    final upperLength = _boneLength(model, upper.id);
+    final lowerLength = _boneLength(model, lower.id);
+    final targetVector = targetWorld - startJoint;
+    final clampedDistance = targetVector.distance.clamp(1e-3, (upperLength + lowerLength - 1e-6));
+    final direction = targetVector.distance < 1e-3 ? const Offset(0, 1) : targetVector / targetVector.distance;
+    final clampedTarget = startJoint + direction * clampedDistance; // clamped target on reachable circle
+
+    // Pole world position
+    Offset poleW;
+    final maybePole = _poleWorldPos(inst, model, lower.id);
+    if (maybePole != null) {
+      poleW = maybePole;
+    } else {
+      // default normal from upper->lower direction
+      final lowerWorld = instWorld * SkeletonUtil.worldOf(lower, pose, bones, cache);
+      final endJoint = _tx(lowerWorld, Offset(lower.pivot.x, lower.pivot.y));
+      final normal = Offset(-(endJoint - startJoint).dy, (endJoint - startJoint).dx);
+      poleW = endJoint + (normal.distance < 1e-3 ? const Offset(0, -40) : normal / normal.distance * 40.0);
+    }
+
+    final st = clampedTarget - startJoint;
+    final sp = poleW - startJoint;
+    final side = (st.dx * sp.dy - st.dy * sp.dx) >= 0 ? 1.0 : -1.0;
+
+    final dlen = st.distance;
+    final cosA = ((upperLength * upperLength + dlen * dlen - lowerLength * lowerLength) / (2 * upperLength * dlen)).clamp(-1.0, 1.0);
+    final a = math.acos(cosA);
+    final cosB = ((upperLength * upperLength + lowerLength * lowerLength - dlen * dlen) / (2 * upperLength * lowerLength)).clamp(-1.0, 1.0);
+    final b = math.acos(cosB);
+
+    final base = math.atan2(st.dy, st.dx);
+    final theta1World = base + side * a - math.pi / 2.0; // because bone forward is +Y
+    // Parent world orientation (Y-axis) for upper bone parent
+    vm.Matrix4 parentW;
+    if (upper.parentId != null) {
+      final parent = bones[upper.parentId]!;
+      parentW = instWorld * SkeletonUtil.worldOf(parent, pose, bones, cache);
+    } else {
+      parentW = instWorld; // instance transform
+    }
+    final parentY = _angleOfYAxis(parentW);
+    double theta1Local = _radToDeg(theta1World - parentY);
+    double theta2Local = _radToDeg(side * (math.pi - b));
+
+    // Write keys
+    final frame = widget.t.round();
+    final newTracks = Map<String, TrackTransform>.from(inst.boneTracks);
+    bool changed = false;
+    void writeRot(String id, double deg) {
+      final tr = newTracks[id] ?? const TrackTransform();
+      final rot = List<KeyF<double>>.from(tr.rotDeg);
+      final i = rot.indexWhere((k) => k.t == frame);
+      final kv = KeyF<double>(frame, deg);
+      if (i >= 0) {
+        rot[i] = kv; changed = true;
+      } else if (widget.autoKey) {
+        rot.add(kv); changed = true;
+      }
+      newTracks[id] = TrackTransform(pos: tr.pos, rotDeg: rot, scale: tr.scale);
+    }
+    writeRot(upper.id, theta1Local);
+    writeRot(lower.id, theta2Local);
+    if (!changed) return null;
+    return inst.copyWith(boneTracks: newTracks);
+  }
+
+  // Select a 2-bone chain from a chosen bone id.
+  // Returns (upper, lower) where lower is end-effector bone.

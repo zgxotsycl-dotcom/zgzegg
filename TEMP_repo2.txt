@@ -1,0 +1,320 @@
+      if (a.type == PrimType.image) {
+        if (a.imagePath != null) await _ensureImageDecoded(a.imagePath!);
+        if (a.spriteFrames != null) {
+          for (final sp in a.spriteFrames!) {
+            await _ensureImageDecoded(sp);
+          }
+        }
+      }
+    }
+  }
+
+  // Overwrite the default 'stickman' model from a numeric profile and persist it
+  Future<void> applyStickProfile(StickProfile profile) async {
+    final m = generateStickmanFromProfile(profile);
+    await saveUserModel(m);
+  }
+
+  File get _projectsFile => File(path.join(appDir.path, 'projects.json'));
+
+  Future<void> _loadProjects() async {
+    if (await _projectsFile.exists()) {
+      final s = await _projectsFile.readAsString();
+      final j = jsonDecode(s) as List;
+      projects.clear();
+      for (final pjs in j) {
+        projects.add(_projectFromJson(pjs));
+      }
+      // Migrate to 1-based frames so frame 0 does not exist in data
+      _migrateOneBasedFrames();
+      await _saveProjects();
+    }
+  }
+
+  void _migrateOneBasedFrames() {
+    List<KeyF<Vec2>> fixVec2(List<KeyF<Vec2>> src) =>
+        src.map((k) => KeyF<Vec2>(k.t <= 0 ? 1 : k.t, k.v, easing: k.easing)).toList();
+    List<KeyF<double>> fixDouble(List<KeyF<double>> src) =>
+        src.map((k) => KeyF<double>(k.t <= 0 ? 1 : k.t, k.v, easing: k.easing)).toList();
+    List<KeyF<int>> fixInt(List<KeyF<int>> src) =>
+        src.map((k) => KeyF<int>(k.t <= 0 ? 1 : k.t, k.v, easing: k.easing)).toList();
+
+    for (int pi = 0; pi < projects.length; pi++) {
+      final project = projects[pi];
+      final migratedSequences = <Sequence>[];
+      for (final sequence in project.sequences) {
+        final migratedInstances = <Instance>[];
+        int lastFrame = 1;
+        for (final instance in sequence.instances) {
+          TrackTransform? baseTrack = instance.baseTrack;
+          if (baseTrack != null) {
+            baseTrack = TrackTransform(
+              pos: fixVec2(baseTrack.pos),
+              rotDeg: fixDouble(baseTrack.rotDeg),
+              scale: fixVec2(baseTrack.scale),
+            );
+            for (final key in baseTrack.pos) {
+              if (key.t > lastFrame) {
+                lastFrame = key.t;
+              }
+            }
+            for (final key in baseTrack.rotDeg) {
+              if (key.t > lastFrame) {
+                lastFrame = key.t;
+              }
+            }
+            for (final key in baseTrack.scale) {
+              if (key.t > lastFrame) {
+                lastFrame = key.t;
+              }
+            }
+          }
+          final migratedBones = <String, TrackTransform>{};
+          instance.boneTracks.forEach((boneId, track) {
+            final fixedTrack = TrackTransform(
+              pos: fixVec2(track.pos),
+              rotDeg: fixDouble(track.rotDeg),
+              scale: fixVec2(track.scale),
+            );
+            migratedBones[boneId] = fixedTrack;
+            for (final key in fixedTrack.pos) {
+              if (key.t > lastFrame) {
+                lastFrame = key.t;
+              }
+            }
+            for (final key in fixedTrack.rotDeg) {
+              if (key.t > lastFrame) {
+                lastFrame = key.t;
+              }
+            }
+            for (final key in fixedTrack.scale) {
+              if (key.t > lastFrame) {
+                lastFrame = key.t;
+              }
+            }
+          });
+          final migratedAttachments = <String, AttTrack>{};
+          instance.attachmentTracks.forEach((attachmentId, track) {
+            final fixedTrack = AttTrack(
+              scale: fixVec2(track.scale),
+              opacity: fixDouble(track.opacity),
+              tint: fixInt(track.tint),
+              frameIndex: fixDouble(track.frameIndex),
+            );
+            migratedAttachments[attachmentId] = fixedTrack;
+            for (final key in fixedTrack.scale) {
+              if (key.t > lastFrame) {
+                lastFrame = key.t;
+              }
+            }
+            for (final key in fixedTrack.opacity) {
+              if (key.t > lastFrame) {
+                lastFrame = key.t;
+              }
+            }
+            for (final key in fixedTrack.tint) {
+              if (key.t > lastFrame) {
+                lastFrame = key.t;
+              }
+            }
+            for (final key in fixedTrack.frameIndex) {
+              if (key.t > lastFrame) {
+                lastFrame = key.t;
+              }
+            }
+          });
+          migratedInstances.add(instance.copyWith(
+            baseTrack: baseTrack,
+            boneTracks: migratedBones,
+            attachmentTracks: migratedAttachments,
+          ));
+        }
+        final adjustedSetting = sequence.setting.totalFrames < lastFrame
+            ? sequence.setting.copyWith(totalFrames: lastFrame)
+            : sequence.setting;
+        migratedSequences.add(sequence.copyWith(instances: migratedInstances, setting: adjustedSetting));
+      }
+      projects[pi] = Project(
+        id: project.id,
+        name: project.name,
+        sequences: migratedSequences,
+        lastOpened: project.lastOpened,
+        favorite: project.favorite,
+      );
+    }
+  }
+
+  Future<void> _saveProjects() async {
+    final j = projects.map(_projectToJson).toList();
+    await _projectsFile.writeAsString(const JsonEncoder.withIndent('  ').convert(j));
+  }
+
+  Map<String, dynamic> _projectToJson(Project p) => {
+        'id': p.id,
+        'name': p.name,
+        'lastOpened': p.lastOpened,
+        'favorite': p.favorite,
+        'sequences': p.sequences.map(_sequenceToJson).toList(),
+      };
+
+  Project _projectFromJson(Map<String, dynamic> j) => Project(
+        id: j['id'],
+        name: j['name'],
+        lastOpened: (j['lastOpened'] as int?) ?? 0,
+        favorite: (j['favorite'] as bool?) ?? false,
+        sequences: (j['sequences'] as List).map((e) => _sequenceFromJson(e)).toList(),
+      );
+
+  Map<String, dynamic> _sequenceToJson(Sequence s) => {
+        'id': s.id,
+        'name': s.name,
+        'setting': {
+          'fps': s.setting.fps,
+          'width': s.setting.width,
+          'height': s.setting.height,
+          'playbackRate': s.setting.playbackRate,
+          'totalFrames': s.setting.totalFrames,
+          'interpolate': s.setting.interpolate,
+        },
+        'onion': {
+          'prevFrames': s.onion.prevFrames,
+          'nextFrames': s.onion.nextFrames,
+          'opacityFalloff': s.onion.opacityFalloff,
+          'prevColor': s.onion.prevColor.value,
+          'nextColor': s.onion.nextColor.value,
+        },
+        'instances': s.instances.map(_instanceToJson).toList(),
+        'audio': s.audio
+            .map((a) => {
+                  'path': a.path,
+                  'offsetSec': a.offsetSec,
+                  'gain': a.gain,
+                  'mute': a.mute
+                })
+            .toList(),
+      };
+
+  Sequence _sequenceFromJson(Map<String, dynamic> j) => Sequence(
+        id: j['id'],
+        name: j['name'],
+        setting: SequenceSetting(
+          fps: j['setting']['fps'],
+          width: j['setting']['width'],
+          height: j['setting']['height'],
+          playbackRate: (j['setting']['playbackRate'] ?? 1.0) * 1.0,
+          totalFrames: (j['setting']['totalFrames'] ?? 300) as int,
+          interpolate: (j['setting']['interpolate'] ?? true) as bool,
+        ),
+        onion: OnionSkinSetting(
+          prevFrames: j['onion']['prevFrames'],
+          nextFrames: j['onion']['nextFrames'],
+          opacityFalloff: (j['onion']['opacityFalloff'] as num).toDouble(),
+          prevColor: ui.Color(j['onion']['prevColor']),
+          nextColor: ui.Color(j['onion']['nextColor']),
+        ),
+        instances: (j['instances'] as List).map((e) => _instanceFromJson(e)).toList(),
+        audio: (j['audio'] as List? ?? [])
+            .map((a) => AudioTrack(
+                  path: a['path'],
+                  offsetSec: (a['offsetSec'] ?? 0) * 1.0,
+                  gain: (a['gain'] ?? 1.0) * 1.0,
+                  mute: (a['mute'] ?? false) as bool,
+                ))
+            .toList(),
+      );
+
+  Map<String, dynamic> _instanceToJson(Instance i) => {
+        'id': i.id,
+        'name': i.name,
+        'modelId': i.modelId,
+        'base': {
+          'pos': i.base.pos.toJson(),
+          'rotDeg': i.base.rotDeg,
+          'scale': i.base.scale.toJson()
+        },
+        if (i.baseTrack != null) 'baseTrack': _trackToJson(i.baseTrack!),
+        'visible': i.visible,
+        'locked': i.locked,
+        'pivot': i.pivot.toJson(),
+        'parentId': i.parentId,
+        'lineWidthScale': i.lineWidthScale,
+        'ikPoles': i.ikPoles.map((k,v)=> MapEntry(k, v.toJson())),
+        'boneTracks': i.boneTracks.map((k, v) => MapEntry(k, _trackToJson(v))),
+        'attachmentTracks': i.attachmentTracks.map((k, v) => MapEntry(k, { 'scale': v.scale.map((e) => {'t': e.t, 'v': e.v.toJson(), 'e': e.easing?.type}).toList(), 'opacity': v.opacity.map((e) => {'t': e.t, 'v': e.v, 'e': e.easing?.type}).toList(), 'tint': v.tint.map((e) => {'t': e.t, 'v': e.v, 'e': e.easing?.type}).toList(), 'frame': v.frameIndex.map((e) => {'t': e.t, 'v': e.v, 'e': e.easing?.type}).toList(), 'offset': v.offset.map((e) => {'t': e.t, 'v': e.v.toJson(), 'e': e.easing?.type}).toList(), })), 'anchorTracks': i.anchorTracks.map((k, list) => MapEntry(k, list.map((e)=> {'t': e.t, 'v': e.v.toJson()}).toList())),
+      };
+
+  Instance _instanceFromJson(Map<String, dynamic> j) {
+    final at = <String, AttTrack>{};
+    final m = j['attachmentTracks'] as Map<String, dynamic>?;
+    if (m != null) {
+      for (final entry in m.entries) {
+        final v = entry.value as Map<String, dynamic>;
+        final sc = (v['scale'] as List? ?? []).map((e) => KeyF<Vec2>(e['t'], Vec2.fromJson(e['v']), easing: e['e'] != null ? Easing(e['e']) : null)).toList();
+        final op = (v['opacity'] as List? ?? []).map((e) => KeyF<double>(e['t'], (e['v'] as num).toDouble(), easing: e['e'] != null ? Easing(e['e']) : null)).toList();
+        final ti = (v['tint'] as List? ?? []).map((e) => KeyF<int>(e['t'], e['v'] as int, easing: e['e'] != null ? Easing(e['e']) : null)).toList();
+        final fr = (v['frame'] as List? ?? []).map((e) => KeyF<double>(e['t'], (e['v'] as num).toDouble(), easing: e['e'] != null ? Easing(e['e']) : null)).toList();
+        final of = (v['offset'] as List? ?? []).map((e) => KeyF<Vec2>(e['t'], Vec2.fromJson(e['v']), easing: e['e'] != null ? Easing(e['e']) : null)).toList();
+        at[entry.key] = AttTrack(scale: sc, opacity: op, tint: ti, frameIndex: fr, offset: of);
+      }
+    }
+    final poles = <String, Vec2>{};
+    final mp = j['ikPoles'] as Map<String, dynamic>?;
+    if (mp != null) {
+      for (final e in mp.entries) {
+        final v = e.value as Map<String, dynamic>;
+        poles[e.key] = Vec2.fromJson(v);
+      }
+    }
+    return Instance(
+      id: j['id'],
+      name: j['name'] ?? 'Layer',
+      modelId: j['modelId'],
+      base: Transform2D(
+        pos: Vec2.fromJson(j['base']['pos']),
+        rotDeg: (j['base']['rotDeg'] as num).toDouble(),
+        scale: Vec2.fromJson(j['base']['scale']),
+      ),
+      baseTrack: j['baseTrack'] != null ? _trackFromJson(j['baseTrack']) : null,
+      visible: (j['visible'] ?? true) as bool,
+      locked: (j['locked'] ?? false) as bool,
+      pivot: j['pivot'] != null ? Vec2.fromJson(j['pivot']) : const Vec2(0, 0),
+      parentId: j['parentId'],
+      ikPoles: poles,
+      lineWidthScale: (j['lineWidthScale'] as num?)?.toDouble() ?? 1.0,
+      boneTracks: (j['boneTracks'] as Map<String, dynamic>).map((k, v) => MapEntry(k, _trackFromJson(v))),
+      attachmentTracks: at,
+      anchorTracks: ((j['anchorTracks'] as Map<String,dynamic>?) ?? const {}).map(
+        (k,v) => MapEntry(k, (v as List).map((e)=> KeyF<Vec2>(e['t'] as int, Vec2.fromJson(e['v']))).toList())
+      ),
+    );
+  }
+
+  // ------------ raster layer ------------
+  Future<Model> createRasterLayer({required int width, required int height}) async {
+    final id = _uuid.v4();
+    final imgPath = path.join(imagesDir.path, '$id.png');
+
+    final recorder = ui.PictureRecorder();
+    ui.Canvas(recorder); // no drawing; create empty picture
+    // Transparent background by default (no fill)
+    final pic = recorder.endRecording();
+    final img = await pic.toImage(width, height);
+    final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
+    if (bytes == null) {
+      throw Exception('Failed to encode empty raster image');
+    }
+    await File(imgPath).writeAsBytes(bytes.buffer.asUint8List());
+    await _ensureImageDecoded(imgPath);
+
+    final m = Model(
+      id: id,
+      name: 'Raster $width x $height',
+      bones: const [Bone(id: 'root', parentId: null, pivot: Vec2(0, 0), bind: Transform2D())],
+      attachments: [Attachment(id: 'layer', boneId: 'root', type: PrimType.image, a: const Vec2(0, 0), b: Vec2(width.toDouble(), height.toDouble()), imagePath: imgPath)],
+    );
+    await saveUserModel(m);
+    return m;
+  }
+
+  Map<String, dynamic> _trackToJson(TrackTransform t) => {
+        'pos': t.pos.map((e) => {'t': e.t, 'v': e.v.toJson(), 'e': e.easing?.type}).toList(),

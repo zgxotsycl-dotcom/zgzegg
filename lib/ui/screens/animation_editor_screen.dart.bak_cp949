@@ -1,0 +1,2515 @@
+import 'dart:async';
+import 'package:flutter/material.dart' hide Easing;
+import 'package:provider/provider.dart';
+import 'package:flutter/scheduler.dart';
+import '../../app.dart';
+import '../../data/models.dart';
+import '../../engine/exporter.dart';
+import '../../engine/animation_engine.dart';
+import '../../util/undo.dart';
+import '../../data/pose_presets.dart';
+import '../../data/stick_profiles.dart';
+import '../widgets/timeline.dart';
+import '../widgets/hierarchy_panel.dart';
+import '../widgets/onion_panel.dart';
+import '../widgets/dock_panel.dart';
+import '../widgets/audio_panel.dart';
+// Canvas and overlay are managed by StageViewport
+import '../widgets/stage_viewport.dart';
+import '../widgets/floating_tools_surface.dart';
+import 'preview_screen.dart';
+import 'package:uuid/uuid.dart';
+import 'package:file_picker/file_picker.dart';
+import 'dart:io';
+import 'package:share_plus/share_plus.dart';
+import 'package:saver_gallery/saver_gallery.dart';
+
+// Adaptive menu actions for narrow AppBar popup
+enum _MenuAction {
+  fit,
+  setLen,
+  interpolate,
+  stickMode,
+  stickProfile,
+  insert,
+  delete,
+  hold,
+  snap,
+  angleSnap,
+  hierarchy,
+  onion,
+  audio,
+  boneMode,
+  keyPos,
+  keyRot,
+  keyScale,
+  keyEasing,
+  dupNext,
+  exportPng,
+  exportMp4,
+  exportSma,
+  undo,
+  redo,
+  mirror,
+  poses,
+  style,
+  addStick,
+  preview,
+  seqSettings,
+}
+
+class AnimationEditorScreen extends StatefulWidget {
+  final Project project;
+  final Sequence sequence;
+  const AnimationEditorScreen({super.key, required this.project, required this.sequence});
+
+  @override
+  State<AnimationEditorScreen> createState() => _AnimationEditorScreenState();
+}
+
+class _AnimationEditorScreenState extends State<AnimationEditorScreen> with WidgetsBindingObserver {
+  late Sequence seq;
+  double curT = 1;
+  int get totalFrames => seq.setting.totalFrames;
+  bool playing = false;
+  bool exporting = false;
+  bool showTimeline = true;
+  bool loopEnabled = false;
+  int loopStart = 1;
+  int loopEnd = 60;
+  Timer? _saveDebounce;
+  bool showHierarchy = true;
+  bool showOnion = true;
+  // Optional end-cap editor dock
+  bool showEndCaps = true;
+  bool _linkLR = true; // Apply L/R together
+  bool _mirrorXForLR = true; // Mirror X when applying to counterpart
+  String? selectedId;
+  String _tool = 'smart'; // smart | move | rotate | scale | ik | lasso
+  bool boneMode = false;
+  String? selectedBoneId;
+  final UndoStack _undo = UndoStack();
+  bool autoKey = true;
+  Ticker? _ticker;
+  Duration _lastTick = Duration.zero;
+  double _frameAcc = 0.0;
+  Timer? _periodicAutoSave;
+  bool snapToFrames = true;
+  bool angleSnap = true; // 15-degree snap for rotate tools
+  // Stick Fighter workflow toggle
+  bool stickMode = true;
+  // Coalesced interaction state
+  bool _coalescing = false;
+  Sequence? _seqBefore;
+
+  @override
+  void initState() {
+    super.initState();
+    seq = widget.sequence;
+    // 편집 시작 시 인스턴스가 하나라도 있으면 자동 선택해 조작 가능하게 함
+    if (seq.instances.isNotEmpty) {
+      selectedId = seq.instances.first.id;
+    }
+    _ticker = Ticker(_onTick);
+    WidgetsBinding.instance.addObserver(this);
+    _periodicAutoSave = Timer.periodic(const Duration(seconds: 15), (_) => _autoSaveNow(reason: 'periodic'));
+    _ensureToolsOverlay();
+  }
+  
+  // Adaptive actions for narrow/wide layouts
+  List<Widget> _buildNarrowActions(BuildContext context) {
+    return [
+      _BouncyIcon(tooltip: '처음으로', icon: Icons.skip_previous, onTap: () => setState(() => curT = 1)),
+      _BouncyIcon(tooltip: '이전 프레임', icon: Icons.chevron_left, onTap: _prevFrame),
+      _BouncyIcon(tooltip: '다음 프레임', icon: Icons.chevron_right, onTap: _nextFrame),
+      PopupMenuButton<_MenuAction>(
+        tooltip: '더보기',
+        onSelected: _handleMenuAction,
+        itemBuilder: (_) => _menuItems(),
+      ),
+    ];
+  }
+
+  List<Widget> _buildWideActions(BuildContext context) {
+    return [
+      _BouncyIcon(tooltip: '키에 맞춰 길이 조절', icon: Icons.straighten, onTap: _fitLengthToKeys),
+      _BouncyIcon(tooltip: '총 프레임 설정', icon: Icons.format_list_numbered, onTap: _promptSetTotalFrames),
+      _BouncyIcon(
+        tooltip: stickMode ? '스틱 파이터 모드: 켬' : '스틱 파이터 모드: 끔',
+        onTap: _toggleStickMode,
+        icon: stickMode ? Icons.sports_kabaddi : Icons.sports_kabaddi_outlined,
+      ),
+      _BouncyIcon(
+        tooltip: seq.setting.interpolate ? '보간: 켬' : '보간: 끔',
+        onTap: () {
+          final newSetting = seq.setting.copyWith(interpolate: !seq.setting.interpolate);
+          _commitInstances(seq.instances, 'Toggle Interpolate', settingOverride: newSetting);
+        },
+        icon: seq.setting.interpolate ? Icons.animation : Icons.animation_outlined,
+      ),
+      _BouncyIcon(tooltip: '프레임 삽입', icon: Icons.add_box, onTap: _insertFrames),
+      _BouncyIcon(tooltip: '프레임 삭제', icon: Icons.indeterminate_check_box, onTap: _deleteFrames),
+      _BouncyIcon(tooltip: '홀드(노출) 프레임', icon: Icons.av_timer, onTap: _holdFrames),
+      _BouncyIcon(tooltip: '처음으로', icon: Icons.skip_previous, onTap: () => setState(() => curT = 1)),
+      _BouncyIcon(tooltip: '이전 프레임', icon: Icons.chevron_left, onTap: _prevFrame),
+      _BouncyIcon(tooltip: '다음 프레임', icon: Icons.chevron_right, onTap: _nextFrame),
+      _BouncyIcon(
+        tooltip: snapToFrames ? '프레임 스냅: 켬' : '프레임 스냅: 끔',
+        onTap: () => setState(() => snapToFrames = !snapToFrames),
+        icon: snapToFrames ? Icons.grid_on : Icons.grid_off,
+      ),
+      _BouncyIcon(
+        tooltip: showHierarchy ? '계층 숨기기' : '계층 표시',
+        onTap: () => setState(() => showHierarchy = !showHierarchy),
+        icon: showHierarchy ? Icons.account_tree : Icons.account_tree_outlined,
+      ),
+      _BouncyIcon(
+        tooltip: showOnion ? '어니언 스킨 숨기기' : '어니언 스킨',
+        onTap: () => setState(() => showOnion = !showOnion),
+        icon: showOnion ? Icons.layers : Icons.layers_outlined,
+      ),
+      // Bone 모드 토글/드롭다운 제거: Stick Fighter UX에 맞게 단순화
+      
+      _BouncyIcon(tooltip: 'PNG 시퀀스 내보내기', onTap: exporting ? null : _exportPng, icon: Icons.image_outlined),
+      _BouncyIcon(tooltip: '애니메이션 내보내기 (.sma)', onTap: _exportSma, icon: Icons.ios_share),
+      _BouncyIcon(tooltip: _undo.canUndo ? 'Undo' : 'Undo (disabled)', onTap: _undo.canUndo ? () { setState(() => _undo.undo()); } : null, icon: Icons.undo),
+      _BouncyIcon(tooltip: _undo.canRedo ? 'Redo' : 'Redo (disabled)', onTap: _undo.canRedo ? () { setState(() => _undo.redo()); } : null, icon: Icons.redo),
+      _BouncyIcon(tooltip: '스틱맨 추가', onTap: _addStickFighter, icon: Icons.accessibility_new),
+      _BouncyIcon(tooltip: '좌↔우 포즈 미러', onTap: _mirrorPose, icon: Icons.flip),
+      _BouncyIcon(tooltip: angleSnap ? '각도 스냅: 켬' : '각도 스냅: 끔', onTap: () => setState(() => angleSnap = !angleSnap), icon: Icons.straighten),
+      _BouncyIcon(tooltip: '미리보기 열기', onTap: _openPreview, icon: Icons.slideshow),
+    ];
+  }
+
+  List<PopupMenuEntry<_MenuAction>> _menuItems() {
+    return [
+      const PopupMenuItem(value: _MenuAction.fit, child: Text('키에 맞춰 길이 조절')),
+      const PopupMenuItem(value: _MenuAction.setLen, child: Text('총 프레임 설정')),
+      const PopupMenuDivider(),
+      PopupMenuItem(value: _MenuAction.stickMode, child: Text(stickMode ? '스틱 파이터 모드: 켬' : '스틱 파이터 모드: 끔')),
+      const PopupMenuItem(value: _MenuAction.stickProfile, child: Text('스틱 파이터 프로필(길이/머리/두께)...')),
+      PopupMenuItem(value: _MenuAction.interpolate, child: Text(seq.setting.interpolate ? '보간: 켬' : '보간: 끔')),
+      const PopupMenuItem(value: _MenuAction.insert, child: Text('프레임 삽입')),
+      const PopupMenuItem(value: _MenuAction.delete, child: Text('프레임 삭제')),
+      const PopupMenuItem(value: _MenuAction.hold, child: Text('홀드(노출) 프레임')),
+      const PopupMenuItem(value: _MenuAction.dupNext, child: Text('다음 프레임으로 복제')),
+      const PopupMenuDivider(),
+      PopupMenuItem(value: _MenuAction.snap, child: Text(snapToFrames ? 'Snap: ON' : 'Snap: OFF')),
+      PopupMenuItem(value: _MenuAction.angleSnap, child: Text(angleSnap ? 'Angle Snap 15°: ON' : 'Angle Snap 15°: OFF')),
+      PopupMenuItem(value: _MenuAction.hold, child: Text(angleSnap ? 'Angle Snap 15°: ON' : 'Angle Snap 15°: OFF')),
+      PopupMenuItem(value: _MenuAction.hierarchy, child: Text(showHierarchy ? 'Hide Hierarchy' : 'Show Hierarchy')),
+      PopupMenuItem(value: _MenuAction.onion, child: Text(showOnion ? 'Hide Onion Skin' : 'Onion Skin')),
+      const PopupMenuDivider(),
+      const PopupMenuItem(value: _MenuAction.keyEasing, child: Text('키 이징...')),
+      const PopupMenuItem(value: _MenuAction.poses, child: Text('포즈 프리셋 적용...')),
+      const PopupMenuItem(value: _MenuAction.style, child: Text('피겨 스타일...')),
+      const PopupMenuItem(value: _MenuAction.audio, child: Text('오디오 트랙...')),
+      const PopupMenuDivider(),
+      
+      const PopupMenuItem(value: _MenuAction.exportPng, child: Text('PNG 시퀀스 내보내기')),
+      const PopupMenuItem(value: _MenuAction.exportMp4, child: Text('비디오 내보내기 (MP4)')),
+      const PopupMenuItem(value: _MenuAction.exportSma, child: Text('애니메이션 내보내기 (.sma)')),
+      const PopupMenuDivider(),
+      const PopupMenuItem(value: _MenuAction.undo, child: Text('Undo')),
+      const PopupMenuItem(value: _MenuAction.redo, child: Text('Redo')),
+      const PopupMenuItem(value: _MenuAction.mirror, child: Text('Mirror Pose L↔R')),
+      const PopupMenuItem(value: _MenuAction.addStick, child: Text('Add Stickman')),
+      const PopupMenuItem(value: _MenuAction.preview, child: Text('Open Preview')),
+      const PopupMenuItem(value: _MenuAction.seqSettings, child: Text('Sequence Settings...')),
+    ];
+  }
+
+  void _handleMenuAction(_MenuAction action) {
+    switch (action) {
+      case _MenuAction.fit:
+        _fitLengthToKeys();
+        break;
+      case _MenuAction.setLen:
+        _promptSetTotalFrames();
+        break;
+      case _MenuAction.stickMode:
+        _toggleStickMode();
+        break;
+      case _MenuAction.stickProfile:
+        _openStickProfileSheet();
+        break;
+      case _MenuAction.interpolate:
+        final newSetting = seq.setting.copyWith(interpolate: !seq.setting.interpolate);
+        _commitInstances(seq.instances, 'Toggle Interpolate', settingOverride: newSetting);
+        break;
+      case _MenuAction.insert:
+        _insertFrames();
+        break;
+      case _MenuAction.delete:
+        _deleteFrames();
+        break;
+      case _MenuAction.hold:
+        _holdFrames();
+        break;
+      case _MenuAction.dupNext:
+        _duplicateKeysToNext();
+        break;
+      case _MenuAction.snap:
+        setState(() => snapToFrames = !snapToFrames);
+        break;
+      case _MenuAction.angleSnap:
+        setState(() => angleSnap = !angleSnap);
+        break;
+      // Reuse 'hold' menu slot above for Angle Snap toggle label only; real toggle here would require new enum.
+      case _MenuAction.hierarchy:
+        {
+          final narrow = MediaQuery.of(context).size.width < 600;
+          if (narrow) {
+            _openHierarchySheet();
+          } else {
+            setState(() => showHierarchy = !showHierarchy);
+          }
+        }
+        break;
+      case _MenuAction.onion:
+        {
+          final narrow = MediaQuery.of(context).size.width < 600;
+          if (narrow) {
+            _openOnionSheet();
+          } else {
+            setState(() => showOnion = !showOnion);
+          }
+        }
+        break;
+      case _MenuAction.audio:
+        _openAudioSheet();
+        break;
+      // BoneMode 항목은 사용하지 않음(Stick Fighter UX)
+      case _MenuAction.boneMode:
+        break;
+      case _MenuAction.keyPos:
+        _keyPos();
+        break;
+      case _MenuAction.keyRot:
+        _keyRot();
+        break;
+      case _MenuAction.keyScale:
+        _keyScale();
+        break;
+      case _MenuAction.keyEasing:
+        _editKeyEasing();
+        break;
+      case _MenuAction.exportPng:
+        if (!exporting) _exportPng();
+        break;
+      case _MenuAction.exportMp4:
+        if (!exporting) _exportMp4();
+        break;
+      case _MenuAction.exportSma:
+        _exportSma();
+        break;
+      case _MenuAction.seqSettings:
+        _openSequenceSettings();
+        break;
+      case _MenuAction.undo:
+        if (_undo.canUndo) setState(() => _undo.undo());
+        break;
+      case _MenuAction.redo:
+        if (_undo.canRedo) setState(() => _undo.redo());
+        break;
+      case _MenuAction.mirror:
+        _mirrorPose();
+        break;
+      case _MenuAction.poses:
+        _showPosePicker();
+        break;
+      case _MenuAction.style:
+        _openStyleSheet();
+        break;
+      case _MenuAction.addStick:
+        _addStickFighter();
+        break;
+      case _MenuAction.preview:
+        _openPreview();
+        break;
+      default:
+        break;
+    }
+  }
+
+  Future<void> _exportPng() async {
+    setState(() => exporting = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final dir = await Exporter.exportSequenceToPngs(
+        seq: seq,
+        models: context.read<AppState>().repo.models,
+        images: context.read<AppState>().repo.images,
+        totalFrames: totalFrames,
+      );
+      messenger.showSnackBar(SnackBar(content: Text('PNG exported: ${dir.path}')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('PNG export failed: $e')));
+    } finally {
+      if (mounted) setState(() => exporting = false);
+    }
+  }
+
+  Future<void> _exportSma() async {
+    final repo = context.read<AppState>().repo;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final tmp = await repo.exportBundle(widget.project);
+      final savePath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save Animation File',
+        fileName: '${widget.project.name}.sma',
+        type: FileType.custom,
+        allowedExtensions: const ['sma'],
+      );
+      if (savePath == null) return;
+      await File(tmp.path).copy(savePath);
+      messenger.showSnackBar(SnackBar(content: Text('Exported: $savePath')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Export failed: $e')));
+    }
+  }
+
+  void _openPreview() {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => PreviewScreen(
+        sequence: seq,
+        models: context.read<AppState>().repo.models,
+        images: context.read<AppState>().repo.images,
+        totalFrames: totalFrames,
+      ),
+    ));
+  }
+
+  void _openStickProfileSheet() {
+    final repo = context.read<AppState>().repo;
+    final m = repo.models['stickman'];
+    double headR = 20, torso = 100, ua=60, la=60, th=70, sh=70, limb=4, torsoS=5;
+    if (m != null) {
+      Vec2? bOf(String id) => m.attachments.firstWhere((a)=> a.id==id, orElse: ()=> const Attachment(id:'', boneId:'', type: PrimType.line, a: Vec2(0,0), b: Vec2(0,0))).b;
+      headR = (m.attachments.firstWhere((a)=> a.id=='head_circle', orElse: ()=> const Attachment(id:'', boneId:'', type: PrimType.circle, a: Vec2(0,0), b: Vec2(20,0))).b.x).abs();
+      torso = (bOf('torso_line')?.y.abs() ?? torso);
+      ua = (bOf('l_upper_arm_line')?.y.abs() ?? ua);
+      la = (bOf('l_lower_arm_line')?.y.abs() ?? la);
+      th = (bOf('l_thigh_line')?.y.abs() ?? th);
+      sh = (bOf('l_shin_line')?.y.abs() ?? sh);
+      limb = (m.attachments.firstWhere((a)=> a.id=='l_upper_arm_line', orElse: ()=> const Attachment(id:'', boneId:'', type: PrimType.line, a: Vec2(0,0), b: Vec2(0,0))).strokeWidth);
+      torsoS = (m.attachments.firstWhere((a)=> a.id=='torso_line', orElse: ()=> const Attachment(id:'', boneId:'', type: PrimType.line, a: Vec2(0,0), b: Vec2(0,0))).strokeWidth);
+    }
+    final headCtl = TextEditingController(text: headR.toStringAsFixed(0));
+    final torsoCtl = TextEditingController(text: torso.toStringAsFixed(0));
+    final uaCtl = TextEditingController(text: ua.toStringAsFixed(0));
+    final laCtl = TextEditingController(text: la.toStringAsFixed(0));
+    final thCtl = TextEditingController(text: th.toStringAsFixed(0));
+    final shCtl = TextEditingController(text: sh.toStringAsFixed(0));
+    final limbCtl = TextEditingController(text: limb.toStringAsFixed(1));
+    final torsoSCtl = TextEditingController(text: torsoS.toStringAsFixed(1));
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom).add(const EdgeInsets.all(16)),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('스틱 파이터 프로필', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 12),
+                  _numField('머리 반지름', headCtl),
+                  _numField('몸통 길이', torsoCtl),
+                  _numField('상완 길이', uaCtl),
+                  _numField('하완 길이', laCtl),
+                  _numField('허벅지 길이', thCtl),
+                  _numField('종아리 길이', shCtl),
+                  _numField('팔다리 선 두께', limbCtl),
+                  _numField('몸통 선 두께', torsoSCtl),
+                  const SizedBox(height: 8),
+                  Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+                    TextButton(onPressed: ()=> Navigator.pop(ctx), child: const Text('취소')),
+                    const SizedBox(width: 8),
+                    FilledButton(onPressed: () async {
+                      double p(TextEditingController c, double d){ final v=double.tryParse(c.text.trim()); return v==null||v.isNaN?d:v; }
+                      final prof = StickProfile(
+                        headRadius: p(headCtl, headR), torsoLen: p(torsoCtl, torso), upperArmLen: p(uaCtl, ua), lowerArmLen: p(laCtl, la),
+                        thighLen: p(thCtl, th), shinLen: p(shCtl, sh), strokeLimb: p(limbCtl, limb), strokeTorso: p(torsoSCtl, torsoS),
+                      );
+                      await repo.applyStickProfile(prof);
+                      if (!mounted) return;
+                      setState((){});
+                      Navigator.pop(ctx);
+                    }, child: const Text('적용')),
+                  ])
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _numField(String label, TextEditingController ctl) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4.0),
+      child: TextField(
+        controller: ctl,
+        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        decoration: InputDecoration(labelText: label),
+      ),
+    );
+  }
+
+  Future<void> _exportMp4() async {
+    final opts = await _promptExportOptions(context, defaultFormat: 'mp4');
+    if (opts == null) return;
+    setState(() => exporting = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final start = opts.useLoop && loopEnabled ? loopStart : 1;
+      final end = opts.useLoop && loopEnabled ? loopEnd : totalFrames;
+      final (tw,th) = _scaledResolution(seq.setting.width, seq.setting.height, opts.resPreset);
+      // Simple modal progress dialog with live updates via StatefulBuilder
+      double prog = 0.0;
+      String phase = 'Preparing...';
+      String etaText = '';
+      DateTime stageStart = DateTime.now();
+      final cancelToken = ExportCancelToken();
+      StateSetter? setDialogState;
+      // Show dialog (non-blocking)
+      // ignore: unawaited_futures
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) {
+          return WillPopScope(
+            onWillPop: () async => false,
+            child: StatefulBuilder(
+              builder: (ctx2, setState2) {
+                setDialogState = setState2;
+                return AlertDialog(
+                  title: const Text('Exporting MP4'),
+                  content: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(phase),
+                      const SizedBox(height: 6),
+                      if (etaText.isNotEmpty) Text('남은 시간: ' + etaText, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                      const SizedBox(height: 6),
+                      LinearProgressIndicator(value: prog <= 0.0 ? null : prog),
+                    ],
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () {
+                        cancelToken.cancel();
+                        setState2(() { phase = '취소 중...'; });
+                      },
+                      child: const Text('취소'),
+                    )
+                  ],
+                );
+              },
+            ),
+          );
+        },
+      );
+      void _updateDialog(String newPhase, double newProg){
+        if (setDialogState != null) {
+          setDialogState!.call(() {
+            if (phase != newPhase) {
+              stageStart = DateTime.now();
+            }
+            phase = newPhase;
+            prog = newProg;
+            etaText = _formatEta(stageStart, prog);
+          });
+        }
+      }
+
+      // Kick actual export
+      final res = await Exporter.exportSequenceToMp4(
+        seq: seq,
+        models: context.read<AppState>().repo.models,
+        images: context.read<AppState>().repo.images,
+        totalFrames: totalFrames,
+        startFrame: start,
+        endFrame: end,
+        overrideFps: opts.fps,
+        overrideWidth: tw,
+        overrideHeight: th,
+        onProgress: (cur, max){
+          final p = (max <= 0) ? 0.0 : (cur / max).clamp(0.0, 1.0);
+          _updateDialog('Rendering frames ($cur/$max)', p);
+        },
+        onEncodingProgress: (p){
+          _updateDialog('Encoding video', p);
+        },
+        cancelToken: cancelToken,
+      );
+      // Close progress dialog
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).maybePop();
+      }
+
+      if (Platform.isAndroid || Platform.isIOS) {
+        await _showExportActionsSheet(res.file);
+      } else {
+        final savePath = await FilePicker.platform.saveFile(
+          dialogTitle: 'Save Video (MP4)',
+          fileName: '${seq.name}.mp4',
+          type: FileType.custom,
+          allowedExtensions: const ['mp4'],
+        );
+        if (savePath != null) {
+          await File(res.file.path).copy(savePath);
+          messenger.showSnackBar(SnackBar(content: Text('Video exported: $savePath')));
+        } else {
+          messenger.showSnackBar(SnackBar(content: Text('Video ready: ${res.file.path}')));
+        }
+      }
+    } on ExportCancelled {
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).maybePop();
+      }
+      messenger.showSnackBar(const SnackBar(content: Text('MP4 내보내기가 취소되었습니다.')));
+    } catch (e) {
+      // Close progress dialog if showing
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).maybePop();
+      }
+      messenger.showSnackBar(SnackBar(content: Text('MP4 export failed: $e')));
+    } finally {
+      if (mounted) setState(() => exporting = false);
+    }
+  }
+
+  // Sequence settings dialog: background, preview quality, hit tolerance
+  Future<void> _openSequenceSettings() async {
+    final repo = context.read<AppState>().repo;
+    final s0 = seq.setting;
+    double tol = s0.hitTolerancePx.clamp(8.0, 64.0);
+    double q = s0.previewDownscale.clamp(0.5, 1.0);
+    String? bgPath = s0.backgroundImage;
+    bool lockLen = s0.enforceLengthLock;
+    bool writeAnchor = s0.anchorWriteOnEdit;
+    String pivot = s0.lassoPivot;
+    final colorCtl = TextEditingController(
+      text: '#${s0.backgroundColor.value.toRadixString(16).padLeft(8, '0').toUpperCase()}',
+    );
+
+    Color _parseColor(String input, Color fallback) {
+      var t = input.trim();
+      if (t.startsWith('#')) t = t.substring(1);
+      if (t.length == 6) t = 'FF$t';
+      final v = int.tryParse(t, radix: 16);
+      if (v == null) return fallback;
+      return Color(v);
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx2, setState2) {
+            return AlertDialog(
+              title: const Text('시퀀스 설정'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text('배경 색상 (#AARRGGBB 또는 #RRGGBB)'),
+                    TextField(controller: colorCtl),
+                    const SizedBox(height: 12),
+                    Row(children: [
+                      Expanded(child: Text('배경 이미지: ${bgPath==null?'(없음)':bgPath}')),
+                    ]),
+                    const SizedBox(height: 6),
+                    Row(children: [
+                      FilledButton(onPressed: () async {
+                        final res = await FilePicker.platform.pickFiles(type: FileType.image);
+                        if (res != null && res.files.isNotEmpty && res.files.single.path != null) {
+                          final stored = await repo.importImageToLibrary(res.files.single.path!);
+                          setState2(() { bgPath = stored; });
+                        }
+                      }, child: const Text('이미지 선택')),
+                      const SizedBox(width: 8),
+                      TextButton(onPressed: (){ setState2((){ bgPath = null; }); }, child: const Text('지우기')),
+                    ]),
+                    const SizedBox(height: 16),
+                    const Text('히트 반경 (px)'),
+                    Row(children: [
+                      Expanded(child: Slider(min: 8, max: 64, divisions: 56, value: tol, label: tol.toStringAsFixed(0), onChanged: (v){ setState2(()=> tol = v); })),
+                      SizedBox(width: 48, child: Text(tol.toStringAsFixed(0), textAlign: TextAlign.right)),
+                    ]),
+                    const SizedBox(height: 12),
+                    const Text('프리뷰 품질 (0.5 ~ 1.0)'),
+                    Row(children: [
+                      Expanded(child: Slider(min: 0.5, max: 1.0, divisions: 5, value: q, label: q.toStringAsFixed(2), onChanged: (v){ setState2(()=> q = double.parse(v.toStringAsFixed(2))); })),
+                      SizedBox(width: 48, child: Text(q.toStringAsFixed(2), textAlign: TextAlign.right)),
+                    ]),
+                    const SizedBox(height: 12),
+                    Row(children:[
+                      Switch(value: lockLen, onChanged: (v){ setState2(()=> lockLen = v); }),
+                      const SizedBox(width: 8),
+                      const Expanded(child: Text('세그먼트 길이 고정(편집)')),
+                    ]),
+                    const SizedBox(height: 8),
+                    Row(children:[
+                      Switch(value: writeAnchor, onChanged: (v){ setState2(()=> writeAnchor = v); }),
+                      const SizedBox(width: 8),
+                      const Expanded(child: Text('편집 시 앵커 기록')),
+                    ]),
+                    const SizedBox(height: 12),
+                    const Text('라쏘 피벗 기준'),
+                    const SizedBox(height: 6),
+                    DropdownButton<String>(
+                      value: pivot,
+                      items: const [
+                        DropdownMenuItem(value: 'mass', child: Text('무게중심')),
+                        DropdownMenuItem(value: 'bbox', child: Text('선택 중앙(바운딩박스)')),
+                        DropdownMenuItem(value: 'instance', child: Text('인스턴스 피벗')),
+                      ],
+                      onChanged: (v){ if (v!=null) setState2(()=> pivot = v); },
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: ()=> Navigator.pop(ctx2), child: const Text('취소')),
+                FilledButton(onPressed: (){
+                  final color = _parseColor(colorCtl.text, s0.backgroundColor);
+                  final newSetting = s0.copyWith(
+                    backgroundColor: color,
+                    backgroundImage: bgPath,
+                    hitTolerancePx: tol,
+                    previewDownscale: q,
+                    enforceLengthLock: lockLen,
+                    anchorWriteOnEdit: writeAnchor,
+                    lassoPivot: pivot,
+                  );
+                  _commitInstances(seq.instances, 'Sequence Settings', settingOverride: newSetting);
+                  Navigator.pop(ctx2);
+                }, child: const Text('적용')),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  String _formatEta(DateTime stageStart, double progress) {
+    if (progress <= 0.0) return '';
+    final elapsed = DateTime.now().difference(stageStart).inMilliseconds;
+    if (elapsed <= 0) return '';
+    final totalMs = (elapsed / (progress <= 0 ? 1e-6 : progress)).clamp(0, 12 * 3600 * 1000).toInt();
+    final remainMs = (totalMs - elapsed).clamp(0, 12 * 3600 * 1000).toInt();
+    final secs = (remainMs / 1000).ceil();
+    final m = (secs ~/ 60).toString().padLeft(2, '0');
+    final s = (secs % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  Future<void> _showExportActionsSheet(File file) async {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    await showModalBottomSheet(
+      context: context,
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('갤러리에 저장'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  try {
+                    final res = await SaverGallery.saveFile(
+                      filePath: file.path,
+                      fileName: '${seq.name}.mp4',
+                      androidRelativePath: 'Movies/BOKU Animator',
+                      skipIfExists: false,
+                    );
+                    final ok = res.isSuccess == true;
+                    if (ok == true) {
+                      messenger.showSnackBar(const SnackBar(content: Text('갤러리에 저장되었습니다.')));
+                    } else {
+                      messenger.showSnackBar(SnackBar(content: Text('갤러리 저장 실패: $res')));
+                    }
+                  } catch (e) {
+                    messenger.showSnackBar(SnackBar(content: Text('갤러리 저장 실패: $e')));
+                  }
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.ios_share),
+                title: const Text('공유하기'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await Share.shareXFiles([
+                    XFile(file.path, mimeType: 'video/mp4', name: '${seq.name}.mp4'),
+                  ], text: '${seq.name}.mp4');
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.save_alt),
+                title: const Text('다른 이름으로 저장...'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  final savePath = await FilePicker.platform.saveFile(
+                    dialogTitle: 'Save Video (MP4)',
+                    fileName: '${seq.name}.mp4',
+                    type: FileType.custom,
+                    allowedExtensions: const ['mp4'],
+                  );
+                  if (savePath != null) {
+                    await File(file.path).copy(savePath);
+                    messenger.showSnackBar(SnackBar(content: Text('저장됨: $savePath')));
+                  }
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  (int,int) _scaledResolution(int w, int h, String preset) {
+    if (preset == 'Original') return (w,h);
+    final aspect = w / h;
+    int ph = switch(preset){
+      '1080p' => 1080,
+      '720p' => 720,
+      '480p' => 480,
+      _ => h,
+    };
+    final nh = ph;
+    final nw = (ph * aspect).round();
+    return (nw, nh);
+  }
+
+  Future<_ExportOpts?> _promptExportOptions(BuildContext context, {String defaultFormat = 'mp4'}) async {
+    String res = 'Original';
+    final fpsCtrl = TextEditingController(text: seq.setting.fps.toString());
+    bool useLoopRange = loopEnabled;
+    return await showDialog<_ExportOpts>(context: context, builder: (ctx){
+      return AlertDialog(
+        title: const Text('Export Options'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(children:[ const Text('Resolution'), const SizedBox(width: 12),
+              DropdownButton<String>(value: res, items: const [
+                DropdownMenuItem(value: 'Original', child: Text('Original')),
+                DropdownMenuItem(value: '1080p', child: Text('1080p')),
+                DropdownMenuItem(value: '720p', child: Text('720p')),
+                DropdownMenuItem(value: '480p', child: Text('480p')),
+              ], onChanged: (v){ res = v??res; }),
+            ]),
+            const SizedBox(height: 8),
+            TextField(controller: fpsCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'FPS')),
+            const SizedBox(height: 8),
+            if (loopEnabled)
+              StatefulBuilder(builder: (ctx2,setState2){
+                return CheckboxListTile(value: useLoopRange, onChanged: (b){ setState2(()=> useLoopRange = b??useLoopRange); }, title: Text('Export loop range ($loopStart-$loopEnd)'));
+              })
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: ()=> Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(onPressed: (){
+            final fps = int.tryParse(fpsCtrl.text.trim()) ?? seq.setting.fps;
+            Navigator.pop(ctx, _ExportOpts(resPreset: res, fps: fps, useLoop: useLoopRange));
+          }, child: const Text('Export')),
+        ],
+      );
+    });
+  }
+
+  // Mobile-friendly sheets for narrow layouts
+  void _openHierarchySheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final height = MediaQuery.of(ctx).size.height * 0.6;
+        return SizedBox(
+          height: height,
+          child: HierarchyPanel(
+            sequence: seq,
+            models: context.read<AppState>().repo.models,
+            selectedId: selectedId,
+            onSelect: (id) => setState(() => selectedId = id),
+            onInstancesChanged: (list) => _commitInstances(list, 'Hierarchy change'),
+          ),
+        );
+      },
+    );
+  }
+
+  void _openOnionSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final height = MediaQuery.of(ctx).size.height * 0.5;
+        return SizedBox(
+          height: height,
+          child: OnionPanel(
+            onion: seq.onion,
+            onChanged: (o) => setState(() {
+              seq = Sequence(
+                id: seq.id,
+                name: seq.name,
+                setting: seq.setting,
+                onion: o,
+                instances: seq.instances,
+                audio: seq.audio,
+              );
+            }),
+          ),
+        );
+      },
+    );
+  }
+
+  void _openAudioSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final height = MediaQuery.of(ctx).size.height * 0.6;
+        return SizedBox(
+          height: height,
+          child: AudioPanel(
+            tracks: seq.audio,
+            onChanged: (tracks){
+              setState(() {
+                seq = Sequence(
+                  id: seq.id,
+                  name: seq.name,
+                  setting: seq.setting,
+                  onion: seq.onion,
+                  instances: seq.instances,
+                  audio: tracks,
+                );
+              });
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  void _openStyleSheet() {
+    final id = selectedId; if (id == null) return;
+    final inst = seq.instances.firstWhere((x)=> x.id==id, orElse: ()=> const Instance(id:'', name:'', modelId:'', base: Transform2D()));
+    if (inst.id.isEmpty) return;
+    final ctrl = ValueNotifier<double>(inst.lineWidthScale);
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('Figure Style', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 12),
+                ValueListenableBuilder<double>(
+                  valueListenable: ctrl,
+                  builder: (ctx, v, _) => Row(children:[
+                    const Text('Line Width'),
+                    const SizedBox(width: 8),
+                    Expanded(child: Slider(min: 0.5, max: 2.0, divisions: 15, value: v.clamp(0.5,2.0), onChanged: (nv){ ctrl.value = nv; })),
+                    Text(v.toStringAsFixed(2)),
+                  ]),
+                ),
+                const SizedBox(height: 8),
+                Row(mainAxisAlignment: MainAxisAlignment.end, children:[
+                  TextButton(onPressed: ()=> Navigator.pop(ctx), child: const Text('Cancel')),
+                  const SizedBox(width: 8),
+                  FilledButton(onPressed: (){
+                    final list = seq.instances.map((x)=> x.id==inst.id ? inst.copyWith(lineWidthScale: ctrl.value) : x).toList();
+                    _commitInstances(list, 'Figure Style');
+                    Navigator.pop(ctx);
+                  }, child: const Text('Apply')),
+                ])
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // --- Stick Fighter style pose preset application ---
+  void _showPosePicker() {
+    final presetMap = PosePresets.poses;
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) {
+        final items = presetMap.keys.toList();
+        return SafeArea(
+          child: ListView.separated(
+            padding: const EdgeInsets.all(8),
+            itemCount: items.length,
+            separatorBuilder: (_, __) => const Divider(height: 1),
+            itemBuilder: (ctx, i) {
+              final name = items[i];
+              return ListTile(
+                title: Text(name),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _applyPoseMap(name, presetMap[name]!);
+                },
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+
+  void _applyPoseMap(String name, Map<String,double> map) {
+    if (selectedId == null) return;
+    final idx = seq.instances.indexWhere((x)=> x.id==selectedId);
+    if (idx < 0) return;
+    final instances = List<Instance>.from(seq.instances);
+    var it = instances[idx];
+    final model = context.read<AppState>().repo.models[it.modelId]; if (model == null) return;
+    final frame = curT.round();
+    final newTracks = Map<String, TrackTransform>.from(it.boneTracks);
+    bool changed = false;
+    void writeRot(String boneId, double deg) {
+      final tr = newTracks[boneId] ?? const TrackTransform();
+      final rot = List<KeyF<double>>.from(tr.rotDeg);
+      final i = rot.indexWhere((k) => k.t == frame);
+      final kv = KeyF<double>(frame, deg);
+      if (i >= 0) { rot[i] = kv; changed = true; } else { rot.add(kv); changed = true; }
+      newTracks[boneId] = TrackTransform(pos: tr.pos, rotDeg: rot, scale: tr.scale);
+    }
+    map.forEach((bone, deg) => writeRot(bone, deg));
+    if (!changed) return;
+    instances[idx] = it.copyWith(boneTracks: newTracks);
+    _commitInstances(instances, 'Pose: '+name);
+  }
+
+  Future<String?> _promptPoseText(String title, String initialValue) async {
+    final controller = TextEditingController(text: initialValue);
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Text(title),
+          content: TextField(controller: controller, autofocus: true),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.of(dialogContext).pop(true), child: const Text('OK')),
+          ],
+        );
+      },
+    );
+    return result == true ? controller.text : null;
+  }
+
+  Future<bool> _confirmPose(String message) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Confirm'),
+        content: Text(message),
+        actions: [
+          TextButton(onPressed: ()=> Navigator.of(dialogContext).pop(false), child: const Text('Cancel')),
+          FilledButton(onPressed: ()=> Navigator.of(dialogContext).pop(true), child: const Text('OK')),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  // Floating draggable tools overlay with subtle animation
+  // Floating tools via OverlayEntry for drag performance
+  final ValueNotifier<Offset> _toolsPos = ValueNotifier(const Offset(-1, -1));
+  OverlayEntry? _toolsEntry;
+  void _ensureToolsOverlay() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final overlay = Overlay.of(context);
+      if (_toolsEntry != null) return;
+      final sz = MediaQuery.of(context).size;
+      if (_toolsPos.value.dx < 0) {
+        _toolsPos.value = Offset(sz.width - 160, sz.height - 220);
+      }
+      _toolsEntry = OverlayEntry(
+        builder: (ctx) => Stack(children: [
+          ValueListenableBuilder<Offset>(
+            valueListenable: _toolsPos,
+            builder: (ctx, pos, _) {
+              return Positioned(
+                left: pos.dx,
+                top: pos.dy,
+                child: FloatingToolsSurface(
+                  onDrag: (delta) {
+                    final w = MediaQuery.of(ctx).size.width;
+                    final h = MediaQuery.of(ctx).size.height;
+                    final nx = (pos.dx + delta.dx).clamp(0.0, w - 140);
+                    final ny = (pos.dy + delta.dy).clamp(80.0, h - 120);
+                    _toolsPos.value = Offset(nx, ny);
+                  },
+                  autoKey: autoKey,
+                  boneMode: boneMode,
+                  onToggleAutoKey: () => setState(() => autoKey = !autoKey),
+                  onToggleBoneMode: () => setState(() { boneMode = !boneMode; if (!boneMode) selectedBoneId = null; }),
+                  tool: _tool,
+                  onToolChange: (i) => setState(() => _tool = ['smart','move','rotate','scale','ik','lasso'][i]),
+                ),
+              );
+            },
+          ),
+        ]),
+      );
+      overlay.insert(_toolsEntry!);
+    });
+  }
+
+
+  void _mirrorPose() {
+    if (selectedId == null) return;
+    final idx = seq.instances.indexWhere((x)=> x.id==selectedId);
+    if (idx < 0) return;
+    final it = seq.instances[idx];
+    final t = curT.round();
+
+    // Sample current rotations, then mirror left<->right by flipping signs
+    double sampleRot(TrackTransform? tr) => tr == null || tr.rotDeg.isEmpty ? 0.0 : sampleScalarD(tr.rotDeg, t.toDouble());
+
+    final newBones = Map<String, TrackTransform>.from(it.boneTracks);
+    // Find pairs l_* and r_*
+    final ids = newBones.keys.toList();
+    final paired = <String>{};
+    for (final id in ids) {
+      if (paired.contains(id)) continue;
+      if (id.startsWith('l_')) {
+        final r = 'r_${id.substring(2)}';
+        if (newBones.containsKey(r)) {
+          final ltr = newBones[id];
+          final rtr = newBones[r];
+          final lrot = sampleRot(ltr);
+          final rrot = sampleRot(rtr);
+          // Write mirrored keys at t: right = -left, left = -right
+          TrackTransform setRot(TrackTransform? track, double rot) {
+            final src = track ?? const TrackTransform();
+            final rotations = List<KeyF<double>>.from(src.rotDeg);
+            final index = rotations.indexWhere((k) => k.t == t);
+            final key = KeyF<double>(t, rot);
+            _upsertKey(rotations, index, key);
+            return TrackTransform(pos: src.pos, rotDeg: rotations, scale: src.scale);
+          }
+          newBones[r] = setRot(rtr, -lrot);
+          newBones[id] = setRot(ltr, -rrot);
+          paired.addAll([id,r]);
+        }
+      } else if (id.startsWith('r_')) {
+        final l = 'l_${id.substring(2)}';
+        if (newBones.containsKey(l)) continue; // handled when l_* seen
+      }
+    }
+
+    final list = List<Instance>.from(seq.instances);
+    list[idx] = it.copyWith(boneTracks: newBones);
+    _commitInstances(list, 'Mirror Pose');
+  }
+
+  void _upsertKey<T>(List<KeyF<T>> keys, int index, KeyF<T> value) {
+    if (index >= 0) {
+      keys[index] = value;
+    } else {
+      keys.add(value);
+    }
+  }
+
+  List<DropdownMenuItem<String>> _boneItemsForSelected() {
+    final id = selectedId; if (id == null) return const [];
+    final inst = seq.instances.firstWhere((x)=> x.id==id);
+    final model = context.read<AppState>().repo.models[inst.modelId];
+    if (model == null) return const [];
+    return model.bones.map((b)=> DropdownMenuItem(value: b.id, child: Text(b.id))).toList();
+  }
+
+  List<int> _baseMarkers(){
+    if (selectedId == null) return const [];
+    final it = seq.instances.where((x)=> x.id==selectedId).cast<Instance?>().firstWhere((e)=> e!=null, orElse: ()=> null);
+    if (it == null) return const [];
+    if (boneMode) {
+      final bid = selectedBoneId; if (bid == null) return const [];
+      final tr = it.boneTracks[bid]; if (tr == null) return const [];
+      final s = <int>{};
+      for (final k in tr.pos) { s.add(k.t); }
+      for (final k in tr.rotDeg) { s.add(k.t); }
+      for (final k in tr.scale) { s.add(k.t); }
+      final list = s.toList()..sort();
+      return list;
+    }
+    final bt = it.baseTrack;
+    if (bt == null) return const [];
+    final s = <int>{};
+    for (final k in bt.pos) { s.add(k.t); }
+    for (final k in bt.rotDeg) { s.add(k.t); }
+    for (final k in bt.scale) { s.add(k.t); }
+    final list = s.toList()..sort();
+    return list;
+  }
+
+  // consolidated into single dispose at end of file
+
+  void _scheduleAutosave() {
+    _saveDebounce?.cancel();
+    _saveDebounce = Timer(const Duration(milliseconds: 800), () async {
+      final repo = context.read<AppState>().repo;
+      final proj = Project(
+        id: widget.project.id,
+        name: widget.project.name,
+        sequences: widget.project.sequences.map((s) => s.id == seq.id ? seq : s).toList(),
+      );
+      await repo.upsertProject(proj);
+      await repo.autoSaveProjectSnapshot(proj);
+      
+    });
+  }
+
+  @override
+  void setState(VoidCallback fn) {
+    super.setState(fn);
+    _scheduleAutosave();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isPortrait = MediaQuery.of(context).orientation == Orientation.portrait;
+    final size = MediaQuery.of(context).size;
+    final isNarrow = size.width < 600;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Animation: ${seq.name}'),
+        actions: isNarrow ? _buildNarrowActions(context) : _buildWideActions(context),
+      ),
+      body: Stack(children: [
+        Column(
+          children: [
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: Center(
+                  child: Stack(children: [
+                    StageViewport(
+                      seq: seq,
+                      models: context.read<AppState>().repo.models,
+                      images: context.read<AppState>().repo.images,
+                      t: curT,
+                      selectedId: selectedId,
+                      boneMode: boneMode,
+                      selectedBoneId: selectedBoneId,
+                      tool: _tool,
+                      // follow sequence interpolate preference for preview
+                      autoKey: autoKey,
+                      angleSnap: angleSnap,
+                      stickMode: stickMode,
+                      onQuickToolSelect: (name){ setState(()=> _tool = name); },
+                      onSelect: (id){ setState(()=> selectedId = id); },
+                      onSelectBone: (bid){ setState(()=> selectedBoneId = bid); },
+                      onChange: (updated) {
+                        final list = seq.instances.map((x) => x.id == updated.id ? updated : x).toList();
+                        if (_coalescing) {
+                          setState(()=> seq = seq.copyWith(instances: list));
+                        } else {
+                          _commitInstances(list, 'Gizmo $_tool');
+                        }
+                      },
+                      onInteractionStart: () {
+                        if (!_coalescing) {
+                          _coalescing = true;
+                          _seqBefore = seq;
+                        }
+                      },
+                      onInteractionEnd: (label) {
+                        if (_coalescing) {
+                          final before = _seqBefore!;
+                          final after = seq;
+                          _undo.push(UndoEntry(label, () { setState(()=> seq = before); }, () { setState(()=> seq = after); }));
+                          _coalescing = false;
+                          _seqBefore = null;
+                        }
+                      },
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+            if (showTimeline)
+              SimpleTimeline(
+                totalFrames: totalFrames,
+                current: curT,
+                onScrub: (v) => setState(() => curT = snapToFrames ? v.roundToDouble() : v),
+                oneBased: true,
+                playing: playing,
+                onPlayChanged: (b) {
+                  setState(() => playing = b);
+                  if (b) { _lastTick = Duration.zero; _ticker?.start(); } else { _ticker?.stop(); }
+                },
+                fps: seq.setting.fps,
+                playbackRate: seq.setting.playbackRate,
+                loopStart: loopEnabled ? loopStart : null,
+                loopEnd: loopEnabled ? loopEnd : null,
+                onLoopChanged: (rng) => setState(() {
+                  loopEnabled = true;
+                  loopStart = rng.start.round();
+                  loopEnd = rng.end.round();
+                }),
+                showLoopSlider: loopEnabled,
+                markers: _baseMarkers(),
+                onKeyAdd: (f) => _tlAddKeyEx(f),
+                onKeyDelete: (f) => _tlDeleteKeyEx(f),
+                onKeyMove: (a,b) => _tlMoveKeyEx(a,b),
+              ),
+          ],
+        ),
+        if (showHierarchy)
+          DockPanel(
+            id: 'hierarchy',
+            title: 'Hierarchy',
+            initialRect: const Rect.fromLTWH(12, 80, 340, 320),
+            child: HierarchyPanel(
+              sequence: seq,
+              models: context.read<AppState>().repo.models,
+              selectedId: selectedId,
+              onSelect: (id) => setState(()=> selectedId = id),
+              onInstancesChanged: (list) => _commitInstances(list, 'Hierarchy change'),
+            ),
+          ),
+        if (showOnion)
+          DockPanel(
+            id: 'onion',
+            title: 'Onion Skin',
+            initialRect: const Rect.fromLTWH(364, 80, 320, 200),
+            child: OnionPanel(
+              onion: seq.onion,
+              onChanged: (o) => setState(() {
+                seq = Sequence(
+                  id: seq.id,
+                  name: seq.name,
+                  setting: seq.setting,
+                  onion: o,
+                  instances: seq.instances,
+                  audio: seq.audio,
+                );
+              }),
+            ),
+          ),
+        // Read-only edit status: quick glance of current edit preferences
+        DockPanel(
+          id: 'status',
+          title: 'Edit Status',
+          initialRect: const Rect.fromLTWH(688, 80, 240, 140),
+          child: Builder(builder: (ctx){
+            String pivotLabel(String v){
+              switch(v){
+                case 'bbox': return '선택 중앙(바운딩)';
+                case 'instance': return '인스턴스 피벗';
+                default: return '무게중심';
+              }
+            }
+            return Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('라쏘 피벗: ' + pivotLabel(seq.setting.lassoPivot)),
+                  const SizedBox(height: 6),
+                  Text('세그먼트 길이 고정: ' + (seq.setting.enforceLengthLock ? 'ON' : 'OFF')),
+                  const SizedBox(height: 6),
+                  Text('편집 시 앵커 기록: ' + (seq.setting.anchorWriteOnEdit ? 'ON' : 'OFF')),
+                ],
+              ),
+            );
+          }),
+        ),
+        if (_shouldShowEndCaps())
+          DockPanel(
+            id: 'endcaps',
+            title: 'End Caps',
+            initialRect: const Rect.fromLTWH(12, 410, 340, 260),
+            child: _endCapsPanel(),
+          ),
+          // Floating tools moved to OverlayEntry for performance
+      ]),
+      floatingActionButton: isPortrait
+          ? FloatingActionButton(
+              onPressed: () => setState(() => showTimeline = !showTimeline),
+              tooltip: showTimeline ? 'Hide Timeline' : 'Show Timeline',
+              child: Icon(showTimeline ? Icons.timeline : Icons.timeline_outlined),
+            )
+          : null,
+    );
+  }
+
+  bool _shouldShowEndCaps() {
+    final id = selectedId; if (id == null) return false;
+    final inst = seq.instances.firstWhere((x)=> x.id==id, orElse: ()=> const Instance(id:'', name:'', modelId:'', base: Transform2D()));
+    if (inst.id.isEmpty) return false;
+    final model = context.read<AppState>().repo.models[inst.modelId];
+    if (model == null) return false;
+    bool has(String aid) => model.attachments.any((a)=> a.id==aid);
+    // Only show if wrist/ankle circle attachments exist in the model
+    return has('l_wrist_circle') || has('r_wrist_circle') || has('l_ankle_circle') || has('r_ankle_circle');
+  }
+
+  Widget _endCapsPanel() {
+    final id = selectedId; if (id == null) return const SizedBox.shrink();
+    final inst = seq.instances.firstWhere((x)=> x.id==id);
+    final model = context.read<AppState>().repo.models[inst.modelId];
+    if (model == null) return const SizedBox.shrink();
+
+    Offset _curOff(String attId) {
+      final tr = inst.attachmentTracks[attId];
+      if (tr == null || tr.offset.isEmpty) return const Offset(0,0);
+      final v = tr.offset.first.v; // use frame 1 if present
+      return Offset(v.x, v.y);
+    }
+    double _curRadius(String attId) {
+      final a = model.attachments.firstWhere((e)=> e.id==attId, orElse: ()=> const Attachment(id:'', boneId:'', type: PrimType.circle));
+      if (a.id.isEmpty) return 5.0;
+      final base = a.b.x.abs();
+      final tr = inst.attachmentTracks[attId];
+      final sc = (tr==null || tr.scale.isEmpty) ? 1.0 : tr.scale.first.v.x;
+      return (base * sc).abs();
+    }
+
+    Future<void> _edit(String attId, String label) async {
+      final r0 = _curRadius(attId);
+      final o0 = _curOff(attId);
+      final rc = TextEditingController(text: r0.toStringAsFixed(2));
+      final xc = TextEditingController(text: o0.dx.toStringAsFixed(2));
+      final yc = TextEditingController(text: o0.dy.toStringAsFixed(2));
+      final ok = await showDialog<bool>(context: context, builder: (ctx){
+        return AlertDialog(
+          title: Text(label),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(controller: rc, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Radius (px)')),
+            Row(children:[
+              Expanded(child: TextField(controller: xc, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Offset X'))),
+              const SizedBox(width: 8),
+              Expanded(child: TextField(controller: yc, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Offset Y'))),
+            ])
+          ]),
+          actions: [
+            TextButton(onPressed: ()=> Navigator.pop(ctx,false), child: const Text('Cancel')),
+            FilledButton(onPressed: ()=> Navigator.pop(ctx,true), child: const Text('Apply')),
+          ],
+        );
+      });
+      if (ok != true) return;
+      final rv = double.tryParse(rc.text.trim()) ?? r0;
+      final xv = double.tryParse(xc.text.trim()) ?? o0.dx;
+      final yv = double.tryParse(yc.text.trim()) ?? o0.dy;
+      // Apply to selected
+      _applyEndCap(inst, model, attId, rv, Offset(xv, yv));
+      // Optionally mirror to counterpart with X flipped
+      if (_linkLR) {
+        final cp = _counterpartId(attId);
+        if (cp != null) {
+          _applyEndCap(inst, model, cp, rv, Offset(-xv, yv));
+        }
+      }
+    }
+
+    return ListView(
+      children: [
+        SwitchListTile(
+          title: const Text('Apply Left/Right Together'),
+          value: _linkLR,
+          onChanged: (v) => setState(()=> _linkLR = v),
+        ),
+        if (_linkLR)
+          SwitchListTile(
+            title: const Text('Mirror X on Counterpart'),
+            value: _mirrorXForLR,
+            onChanged: (v)=> setState(()=> _mirrorXForLR = v),
+          ),
+        const Divider(),
+        _capControls('l_wrist_circle', 'Left Wrist'),
+        _capControls('r_wrist_circle', 'Right Wrist'),
+        const Divider(),
+        _capControls('l_ankle_circle', 'Left Ankle'),
+        _capControls('r_ankle_circle', 'Right Ankle'),
+      ],
+    );
+  }
+
+  Widget _capControls(String attId, String label) {
+    final id = selectedId; if (id == null) return const SizedBox.shrink();
+    final inst = seq.instances.firstWhere((x)=> x.id==id);
+    final model = context.read<AppState>().repo.models[inst.modelId];
+    if (model == null) return const SizedBox.shrink();
+    Attachment? findAtt() => model.attachments.firstWhere((e)=> e.id==attId, orElse: ()=> const Attachment(id:'', boneId:'', type: PrimType.circle));
+    double baseRad() { final a = findAtt(); if (a==null || a.id.isEmpty) return 5.0; return a.b.x.abs(); }
+    double curRad() {
+      final base = baseRad();
+      final tr = inst.attachmentTracks[attId];
+      final sc = (tr==null || tr.scale.isEmpty) ? 1.0 : tr.scale.first.v.x;
+      return (base * sc).abs();
+    }
+    Offset curOff() {
+      final tr = inst.attachmentTracks[attId];
+      if (tr == null || tr.offset.isEmpty) return const Offset(0,0);
+      final v = tr.offset.first.v; return Offset(v.x, v.y);
+    }
+    final r0 = curRad();
+    final o0 = curOff();
+    final double rMax = (r0 * 3).clamp(20.0, 120.0);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 6.0),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('$label  R=${r0.toStringAsFixed(1)}  Off=(${o0.dx.toStringAsFixed(1)}, ${o0.dy.toStringAsFixed(1)})'),
+        // Radius slider
+        Row(children:[
+          const SizedBox(width: 8), const Text('R'), Expanded(
+            child: Slider(
+              value: r0.clamp(0.0, rMax), min: 0, max: rMax,
+              onChangeStart: (_) { if(!_coalescing){ _coalescing=true; _seqBefore = seq; } },
+              onChanged: (v) {
+                final off = curOff();
+                _applyEndCapLive(inst, model, attId, v, off);
+                if (_linkLR) {
+                  final cp = _counterpartId(attId);
+                  if (cp != null) {
+                    final xo = _mirrorXForLR ? -off.dx : off.dx;
+                    _applyEndCapLive(inst, model, cp, v, Offset(xo, off.dy));
+                  }
+                }
+              },
+              onChangeEnd: (_) {
+                if (_coalescing) {
+                  final before = _seqBefore!; final after = seq; _undo.push(UndoEntry('Adjust End Caps', (){ setState(()=> seq = before); }, (){ setState(()=> seq = after); })); _coalescing=false; _seqBefore=null;
+                }
+              },
+            ),
+          ), const SizedBox(width: 8),
+        ]),
+        // Offset X slider
+        Row(children:[
+          const SizedBox(width: 8), const Text('X'), Expanded(
+            child: Slider(
+              value: o0.dx.clamp(-60.0, 60.0), min: -60, max: 60,
+              onChangeStart: (_) { if(!_coalescing){ _coalescing=true; _seqBefore = seq; } },
+              onChanged: (v) {
+                final rad = curRad();
+                final oy = curOff().dy;
+                _applyEndCapLive(inst, model, attId, rad, Offset(v, oy));
+                if (_linkLR) {
+                  final cp = _counterpartId(attId);
+                  if (cp != null) {
+                    final vx = _mirrorXForLR ? -v : v;
+                    _applyEndCapLive(inst, model, cp, rad, Offset(vx, oy));
+                  }
+                }
+              },
+              onChangeEnd: (_) {
+                if (_coalescing) {
+                  final before = _seqBefore!; final after = seq; _undo.push(UndoEntry('Adjust End Caps', (){ setState(()=> seq = before); }, (){ setState(()=> seq = after); })); _coalescing=false; _seqBefore=null;
+                }
+              },
+            ),
+          ), const SizedBox(width: 8),
+        ]),
+        // Offset Y slider
+        Row(children:[
+          const SizedBox(width: 8), const Text('Y'), Expanded(
+            child: Slider(
+              value: o0.dy.clamp(-60.0, 60.0), min: -60, max: 60,
+              onChangeStart: (_) { if(!_coalescing){ _coalescing=true; _seqBefore = seq; } },
+              onChanged: (v) {
+                final rad = curRad();
+                final ox = curOff().dx;
+                _applyEndCapLive(inst, model, attId, rad, Offset(ox, v));
+                if (_linkLR) {
+                  final cp = _counterpartId(attId);
+                  if (cp != null) {
+                    final vx = _mirrorXForLR ? -ox : ox;
+                    _applyEndCapLive(inst, model, cp, rad, Offset(vx, v));
+                  }
+                }
+              },
+              onChangeEnd: (_) {
+                if (_coalescing) {
+                  final before = _seqBefore!; final after = seq; _undo.push(UndoEntry('Adjust End Caps', (){ setState(()=> seq = before); }, (){ setState(()=> seq = after); })); _coalescing=false; _seqBefore=null;
+                }
+              },
+            ),
+          ), const SizedBox(width: 8),
+        ]),
+      ]),
+    );
+  }
+
+  void _applyEndCap(Instance inst, Model model, String attId, double radius, Offset offset) {
+    final a = model.attachments.firstWhere((e)=> e.id==attId, orElse: ()=> const Attachment(id:'', boneId:'', type: PrimType.circle));
+    if (a.id.isEmpty) return;
+    final base = a.b.x.abs();
+    final scale = base <= 1e-6 ? 1.0 : (radius / base);
+    final map = Map<String, AttTrack>.from(inst.attachmentTracks);
+    final t0 = map[attId] ?? const AttTrack();
+    final sc = List<KeyF<Vec2>>.from(t0.scale);
+    final of = List<KeyF<Vec2>>.from(t0.offset);
+    // write at frame 1
+    void upsert<T>(List<KeyF<T>> keys, KeyF<T> kv) {
+      final i = keys.indexWhere((k)=> k.t==1);
+      if (i>=0) keys[i]=kv; else keys.add(kv);
+    }
+    upsert<Vec2>(sc, KeyF<Vec2>(1, Vec2(scale, scale)));
+    upsert<Vec2>(of, KeyF<Vec2>(1, Vec2(offset.dx, offset.dy)));
+    map[attId] = AttTrack(scale: sc, opacity: t0.opacity, tint: t0.tint, frameIndex: t0.frameIndex, offset: of);
+    final list = seq.instances.map((x)=> x.id==inst.id ? inst.copyWith(attachmentTracks: map) : x).toList();
+    _commitInstances(list, 'Adjust End Caps');
+  }
+
+  void _applyEndCapLive(Instance inst, Model model, String attId, double radius, Offset offset) {
+    final a = model.attachments.firstWhere((e)=> e.id==attId, orElse: ()=> const Attachment(id:'', boneId:'', type: PrimType.circle));
+    if (a.id.isEmpty) return;
+    final base = a.b.x.abs();
+    final scale = base <= 1e-6 ? 1.0 : (radius / base);
+    final map = Map<String, AttTrack>.from(inst.attachmentTracks);
+    final t0 = map[attId] ?? const AttTrack();
+    final sc = List<KeyF<Vec2>>.from(t0.scale);
+    final of = List<KeyF<Vec2>>.from(t0.offset);
+    void upsert<T>(List<KeyF<T>> keys, KeyF<T> kv) {
+      final i = keys.indexWhere((k)=> k.t==1);
+      if (i>=0) keys[i]=kv; else keys.add(kv);
+    }
+    upsert<Vec2>(sc, KeyF<Vec2>(1, Vec2(scale, scale)));
+    upsert<Vec2>(of, KeyF<Vec2>(1, Vec2(offset.dx, offset.dy)));
+    map[attId] = AttTrack(scale: sc, opacity: t0.opacity, tint: t0.tint, frameIndex: t0.frameIndex, offset: of);
+    final list = seq.instances.map((x)=> x.id==inst.id ? inst.copyWith(attachmentTracks: map) : x).toList();
+    setState(()=> seq = seq.copyWith(instances: list));
+  }
+
+  String? _counterpartId(String attId) {
+    if (attId.startsWith('l_')) return 'r_${attId.substring(2)}';
+    if (attId.startsWith('r_')) return 'l_${attId.substring(2)}';
+    return null;
+  }
+
+  void _ensureBaseTrack(Instance it, List<Instance> list, int idx) {
+    if (it.baseTrack != null) return;
+    final nt = TrackTransform(
+      pos: [KeyF<Vec2>(1, it.base.pos)],
+      rotDeg: [KeyF<double>(1, it.base.rotDeg)],
+      scale: [KeyF<Vec2>(1, it.base.scale)],
+    );
+    list[idx] = Instance(
+      id: it.id,
+      name: it.name,
+      modelId: it.modelId,
+      base: it.base,
+      baseTrack: nt,
+      boneTracks: it.boneTracks,
+      attachmentTracks: it.attachmentTracks,
+      visible: it.visible,
+      locked: it.locked,
+      pivot: it.pivot,
+      parentId: it.parentId,
+    );
+  }
+
+  void _keyPos(){
+    if (selectedId == null) return;
+    final idx = seq.instances.indexWhere((x)=> x.id==selectedId);
+    if (idx<0) return;
+    final list = List<Instance>.from(seq.instances);
+    var it = list[idx];
+    _ensureBaseTrack(it, list, idx);
+    it = list[idx];
+    final t = curT.round();
+    final keys = List<KeyF<Vec2>>.from(it.baseTrack!.pos);
+    final ei = keys.indexWhere((k)=> k.t==t);
+    final kv = KeyF<Vec2>(t, it.base.pos);
+    if (ei>=0) { keys[ei] = kv; } else { keys.add(kv); }
+    list[idx] = Instance(
+      id: it.id,
+      name: it.name,
+      modelId: it.modelId,
+      base: it.base,
+      baseTrack: TrackTransform(pos: keys, rotDeg: it.baseTrack!.rotDeg, scale: it.baseTrack!.scale),
+      boneTracks: it.boneTracks,
+      attachmentTracks: it.attachmentTracks,
+      visible: it.visible,
+      locked: it.locked,
+      pivot: it.pivot,
+      parentId: it.parentId,
+    );
+    final needFrames = t;
+    final newSetting = needFrames > seq.setting.totalFrames ? seq.setting.copyWith(totalFrames: needFrames) : seq.setting;
+    _commitInstances(list, 'Key Pos', settingOverride: newSetting);
+  }
+
+  void _keyRot(){
+    if (selectedId == null) return;
+    final idx = seq.instances.indexWhere((x)=> x.id==selectedId);
+    if (idx<0) return;
+    final list = List<Instance>.from(seq.instances);
+    var it = list[idx];
+    _ensureBaseTrack(it, list, idx);
+    it = list[idx];
+    final t = curT.round();
+    final keys = List<KeyF<double>>.from(it.baseTrack!.rotDeg);
+    final ei = keys.indexWhere((k)=> k.t==t);
+    final kv = KeyF<double>(t, it.base.rotDeg);
+    if (ei>=0) { keys[ei] = kv; } else { keys.add(kv); }
+    list[idx] = Instance(
+      id: it.id,
+      name: it.name,
+      modelId: it.modelId,
+      base: it.base,
+      baseTrack: TrackTransform(pos: it.baseTrack!.pos, rotDeg: keys, scale: it.baseTrack!.scale),
+      boneTracks: it.boneTracks,
+      attachmentTracks: it.attachmentTracks,
+      visible: it.visible,
+      locked: it.locked,
+      pivot: it.pivot,
+      parentId: it.parentId,
+    );
+    final needFrames = t;
+    final newSetting = needFrames > seq.setting.totalFrames ? seq.setting.copyWith(totalFrames: needFrames) : seq.setting;
+    _commitInstances(list, 'Key Rot', settingOverride: newSetting);
+  }
+
+  void _keyScale(){
+    if (selectedId == null) return;
+    final idx = seq.instances.indexWhere((x)=> x.id==selectedId);
+    if (idx<0) return;
+    final list = List<Instance>.from(seq.instances);
+    var it = list[idx];
+    _ensureBaseTrack(it, list, idx);
+    it = list[idx];
+    final t = curT.round();
+    final keys = List<KeyF<Vec2>>.from(it.baseTrack!.scale);
+    final ei = keys.indexWhere((k)=> k.t==t);
+    final kv = KeyF<Vec2>(t, it.base.scale);
+    if (ei>=0) { keys[ei] = kv; } else { keys.add(kv); }
+    list[idx] = Instance(
+      id: it.id,
+      name: it.name,
+      modelId: it.modelId,
+      base: it.base,
+      baseTrack: TrackTransform(pos: it.baseTrack!.pos, rotDeg: it.baseTrack!.rotDeg, scale: keys),
+      boneTracks: it.boneTracks,
+      attachmentTracks: it.attachmentTracks,
+      visible: it.visible,
+      locked: it.locked,
+      pivot: it.pivot,
+      parentId: it.parentId,
+    );
+    final needFrames = t;
+    final newSetting = needFrames > seq.setting.totalFrames ? seq.setting.copyWith(totalFrames: needFrames) : seq.setting;
+    _commitInstances(list, 'Key Scale', settingOverride: newSetting);
+  }
+
+  // Extended timeline editing supporting bone mode
+  void _tlAddKeyEx(int frame) {
+    if (selectedId == null) return;
+    final idx = seq.instances.indexWhere((x)=> x.id==selectedId); if (idx<0) return;
+    final list = List<Instance>.from(seq.instances);
+    var it = list[idx];
+    final comp = _tool;
+    if (boneMode) {
+      final bid = selectedBoneId; if (bid == null) return;
+      final m = Map<String, TrackTransform>.from(it.boneTracks);
+      final tr = m[bid] ?? const TrackTransform();
+      if (comp == 'move') {
+        final keys = List<KeyF<Vec2>>.from(tr.pos);
+        final i = keys.indexWhere((k)=> k.t==frame); final kv = KeyF<Vec2>(frame, const Vec2(0,0));
+        _upsertKey(keys, i, kv);
+        m[bid] = TrackTransform(pos: keys, rotDeg: tr.rotDeg, scale: tr.scale);
+      } else if (comp == 'rotate') {
+        final keys = List<KeyF<double>>.from(tr.rotDeg);
+        final i = keys.indexWhere((k)=> k.t==frame); final kv = KeyF<double>(frame, 0);
+        _upsertKey(keys, i, kv);
+        m[bid] = TrackTransform(pos: tr.pos, rotDeg: keys, scale: tr.scale);
+      } else if (comp == 'scale') {
+        final keys = List<KeyF<Vec2>>.from(tr.scale);
+        final i = keys.indexWhere((k)=> k.t==frame); final kv = KeyF<Vec2>(frame, const Vec2(1,1));
+        _upsertKey(keys, i, kv);
+        m[bid] = TrackTransform(pos: tr.pos, rotDeg: tr.rotDeg, scale: keys);
+      }
+      list[idx] = it.copyWith(boneTracks: m);
+    } else {
+      _ensureBaseTrack(it, list, idx); it = list[idx];
+      final bt = it.baseTrack!;
+      if (comp == 'move') {
+        final keys = List<KeyF<Vec2>>.from(bt.pos);
+        final i = keys.indexWhere((k)=> k.t==frame); final kv = KeyF<Vec2>(frame, it.base.pos);
+        _upsertKey(keys, i, kv);
+        list[idx] = it.copyWith(baseTrack: TrackTransform(pos: keys, rotDeg: bt.rotDeg, scale: bt.scale));
+      } else if (comp == 'rotate') {
+        final keys = List<KeyF<double>>.from(bt.rotDeg);
+        final i = keys.indexWhere((k)=> k.t==frame); final kv = KeyF<double>(frame, it.base.rotDeg);
+        _upsertKey(keys, i, kv);
+        list[idx] = it.copyWith(baseTrack: TrackTransform(pos: bt.pos, rotDeg: keys, scale: bt.scale));
+      } else if (comp == 'scale') {
+        final keys = List<KeyF<Vec2>>.from(bt.scale);
+        final i = keys.indexWhere((k)=> k.t==frame); final kv = KeyF<Vec2>(frame, it.base.scale);
+        _upsertKey(keys, i, kv);
+        list[idx] = it.copyWith(baseTrack: TrackTransform(pos: bt.pos, rotDeg: bt.rotDeg, scale: keys));
+      }
+    }
+    // ensure timeline extends if needed (1-based)
+    final needFrames = frame;
+    final newSetting = needFrames > seq.setting.totalFrames ? seq.setting.copyWith(totalFrames: needFrames) : seq.setting;
+    _commitInstances(list, 'Timeline add', settingOverride: newSetting);
+  }
+
+  void _tlDeleteKeyEx(int frame) {
+    if (selectedId == null) return;
+    final idx = seq.instances.indexWhere((x)=> x.id==selectedId); if (idx<0) return;
+    final list = List<Instance>.from(seq.instances);
+    final it = list[idx];
+    final comp = _tool;
+    if (boneMode) {
+      final bid = selectedBoneId; if (bid == null) return;
+      final tr = it.boneTracks[bid]; if (tr == null) return;
+      final m = Map<String, TrackTransform>.from(it.boneTracks);
+      if (comp == 'move') {
+        final keys = List<KeyF<Vec2>>.from(tr.pos)..removeWhere((k)=> k.t==frame);
+        m[bid] = TrackTransform(pos: keys, rotDeg: tr.rotDeg, scale: tr.scale);
+      } else if (comp == 'rotate') {
+        final keys = List<KeyF<double>>.from(tr.rotDeg)..removeWhere((k)=> k.t==frame);
+        m[bid] = TrackTransform(pos: tr.pos, rotDeg: keys, scale: tr.scale);
+      } else if (comp == 'scale') {
+        final keys = List<KeyF<Vec2>>.from(tr.scale)..removeWhere((k)=> k.t==frame);
+        m[bid] = TrackTransform(pos: tr.pos, rotDeg: tr.rotDeg, scale: keys);
+      }
+      list[idx] = it.copyWith(boneTracks: m);
+    } else {
+      if (it.baseTrack==null) return;
+      final bt = it.baseTrack!;
+      if (comp == 'move') {
+        final keys = List<KeyF<Vec2>>.from(bt.pos)..removeWhere((k)=> k.t==frame);
+        list[idx] = it.copyWith(baseTrack: TrackTransform(pos: keys, rotDeg: bt.rotDeg, scale: bt.scale));
+      } else if (comp == 'rotate') {
+        final keys = List<KeyF<double>>.from(bt.rotDeg)..removeWhere((k)=> k.t==frame);
+        list[idx] = it.copyWith(baseTrack: TrackTransform(pos: bt.pos, rotDeg: keys, scale: bt.scale));
+      } else if (comp == 'scale') {
+        final keys = List<KeyF<Vec2>>.from(bt.scale)..removeWhere((k)=> k.t==frame);
+        list[idx] = it.copyWith(baseTrack: TrackTransform(pos: bt.pos, rotDeg: bt.rotDeg, scale: keys));
+      }
+    }
+    _commitInstances(list, 'Timeline delete');
+  }
+
+  void _tlMoveKeyEx(int from, int to) {
+    if (selectedId == null) return;
+    final idx = seq.instances.indexWhere((x)=> x.id==selectedId); if (idx<0) return;
+    final list = List<Instance>.from(seq.instances);
+    final it = list[idx];
+    final comp = _tool;
+    if (boneMode) {
+      final bid = selectedBoneId; if (bid == null) return;
+      final tr = it.boneTracks[bid]; if (tr == null) return;
+      final m = Map<String, TrackTransform>.from(it.boneTracks);
+      if (comp == 'move') {
+        final keys = List<KeyF<Vec2>>.from(tr.pos);
+        final i = keys.indexWhere((k)=> k.t==from); if (i<0) return;
+        keys[i] = KeyF<Vec2>(to, keys[i].v, easing: keys[i].easing);
+        m[bid] = TrackTransform(pos: keys, rotDeg: tr.rotDeg, scale: tr.scale);
+      } else if (comp == 'rotate') {
+        final keys = List<KeyF<double>>.from(tr.rotDeg);
+        final i = keys.indexWhere((k)=> k.t==from); if (i<0) return;
+        keys[i] = KeyF<double>(to, keys[i].v, easing: keys[i].easing);
+        m[bid] = TrackTransform(pos: tr.pos, rotDeg: keys, scale: tr.scale);
+      } else if (comp == 'scale') {
+        final keys = List<KeyF<Vec2>>.from(tr.scale);
+        final i = keys.indexWhere((k)=> k.t==from); if (i<0) return;
+        keys[i] = KeyF<Vec2>(to, keys[i].v, easing: keys[i].easing);
+        m[bid] = TrackTransform(pos: tr.pos, rotDeg: tr.rotDeg, scale: keys);
+      }
+      list[idx] = it.copyWith(boneTracks: m);
+    } else {
+      if (it.baseTrack==null) return;
+      final bt = it.baseTrack!;
+      if (comp == 'move') {
+        final keys = List<KeyF<Vec2>>.from(bt.pos);
+        final i = keys.indexWhere((k)=> k.t==from); if (i<0) return;
+        keys[i] = KeyF<Vec2>(to, keys[i].v, easing: keys[i].easing);
+        list[idx] = it.copyWith(baseTrack: TrackTransform(pos: keys, rotDeg: bt.rotDeg, scale: bt.scale));
+      } else if (comp == 'rotate') {
+        final keys = List<KeyF<double>>.from(bt.rotDeg);
+        final i = keys.indexWhere((k)=> k.t==from); if (i<0) return;
+        keys[i] = KeyF<double>(to, keys[i].v, easing: keys[i].easing);
+        list[idx] = it.copyWith(baseTrack: TrackTransform(pos: bt.pos, rotDeg: keys, scale: bt.scale));
+      } else if (comp == 'scale') {
+        final keys = List<KeyF<Vec2>>.from(bt.scale);
+        final i = keys.indexWhere((k)=> k.t==from); if (i<0) return;
+        keys[i] = KeyF<Vec2>(to, keys[i].v, easing: keys[i].easing);
+        list[idx] = it.copyWith(baseTrack: TrackTransform(pos: bt.pos, rotDeg: bt.rotDeg, scale: keys));
+      }
+    }
+    _commitInstances(list, 'Timeline move');
+  }
+
+  void _commitInstances(List<Instance> list, String label, {SequenceSetting? settingOverride}) {
+    final before = seq;
+    final after = seq.copyWith(instances: list, setting: settingOverride ?? seq.setting);
+    _undo.push(UndoEntry(label, () { setState(()=> seq = before); }, () { setState(()=> seq = after); }));
+    setState(()=> seq = after);
+  }
+
+  // Duplicate keys at current frame to next frame for current component
+  void _duplicateKeysToNext() {
+    if (selectedId == null) return;
+    final idx = seq.instances.indexWhere((x)=> x.id==selectedId); if (idx<0) return;
+    final list = List<Instance>.from(seq.instances);
+    var it = list[idx];
+    final t = curT.round();
+    final next = (t + 1).clamp(1, seq.setting.totalFrames + 1);
+    if (boneMode) {
+      final bid = selectedBoneId; if (bid == null) return;
+      final tr = it.boneTracks[bid] ?? const TrackTransform();
+      final m = Map<String, TrackTransform>.from(it.boneTracks);
+      if (_tool == 'move') {
+        final keys = List<KeyF<Vec2>>.from(tr.pos);
+        final src = keys.firstWhere((k)=> k.t==t, orElse: ()=> KeyF<Vec2>(t, const Vec2(0,0)));
+        final i = keys.indexWhere((k)=> k.t==next);
+        final kv = KeyF<Vec2>(next, src.v, easing: src.easing);
+        _upsertKey(keys, i, kv);
+        m[bid] = TrackTransform(pos: keys, rotDeg: tr.rotDeg, scale: tr.scale);
+      } else if (_tool == 'rotate') {
+        final keys = List<KeyF<double>>.from(tr.rotDeg);
+        final src = keys.firstWhere((k)=> k.t==t, orElse: ()=> KeyF<double>(t, 0));
+        final i = keys.indexWhere((k)=> k.t==next);
+        final kv = KeyF<double>(next, src.v, easing: src.easing);
+        _upsertKey(keys, i, kv);
+        m[bid] = TrackTransform(pos: tr.pos, rotDeg: keys, scale: tr.scale);
+      } else if (_tool == 'scale') {
+        final keys = List<KeyF<Vec2>>.from(tr.scale);
+        final src = keys.firstWhere((k)=> k.t==t, orElse: ()=> KeyF<Vec2>(t, const Vec2(1,1)));
+        final i = keys.indexWhere((k)=> k.t==next);
+        final kv = KeyF<Vec2>(next, src.v, easing: src.easing);
+        _upsertKey(keys, i, kv);
+        m[bid] = TrackTransform(pos: tr.pos, rotDeg: tr.rotDeg, scale: keys);
+      }
+      list[idx] = it.copyWith(boneTracks: m);
+    } else {
+      _ensureBaseTrack(it, list, idx); it = list[idx];
+      final bt = it.baseTrack!;
+      if (_tool == 'move') {
+        final keys = List<KeyF<Vec2>>.from(bt.pos);
+        final src = keys.firstWhere((k)=> k.t==t, orElse: ()=> KeyF<Vec2>(t, it.base.pos));
+        final i = keys.indexWhere((k)=> k.t==next);
+        final kv = KeyF<Vec2>(next, src.v, easing: src.easing);
+        _upsertKey(keys, i, kv);
+        list[idx] = it.copyWith(baseTrack: TrackTransform(pos: keys, rotDeg: bt.rotDeg, scale: bt.scale));
+      } else if (_tool == 'rotate') {
+        final keys = List<KeyF<double>>.from(bt.rotDeg);
+        final src = keys.firstWhere((k)=> k.t==t, orElse: ()=> KeyF<double>(t, it.base.rotDeg));
+        final i = keys.indexWhere((k)=> k.t==next);
+        final kv = KeyF<double>(next, src.v, easing: src.easing);
+        _upsertKey(keys, i, kv);
+        list[idx] = it.copyWith(baseTrack: TrackTransform(pos: bt.pos, rotDeg: keys, scale: bt.scale));
+      } else if (_tool == 'scale') {
+        final keys = List<KeyF<Vec2>>.from(bt.scale);
+        final src = keys.firstWhere((k)=> k.t==t, orElse: ()=> KeyF<Vec2>(t, it.base.scale));
+        final i = keys.indexWhere((k)=> k.t==next);
+        final kv = KeyF<Vec2>(next, src.v, easing: src.easing);
+        _upsertKey(keys, i, kv);
+        list[idx] = it.copyWith(baseTrack: TrackTransform(pos: bt.pos, rotDeg: bt.rotDeg, scale: keys));
+      }
+    }
+    final needFrames = next;
+    final newSetting = needFrames > seq.setting.totalFrames ? seq.setting.copyWith(totalFrames: needFrames) : seq.setting;
+    _commitInstances(list, 'Duplicate to next', settingOverride: newSetting);
+  }
+
+  // Set easing for current key or next segment for current component
+  Future<void> _editKeyEasing() async {
+    if (selectedId == null) return;
+    final idx = seq.instances.indexWhere((x)=> x.id==selectedId); if (idx<0) return;
+    final repo = context.read<AppState>().repo;
+    String selected = 'linear';
+    String custom = '';
+    final presetNames = ['linear','easeInCubic','easeOutCubic','easeInOutCubic', ...repo.easingPresets.keys];
+
+    final chosen = await showDialog<String>(context: context, builder: (ctx){
+      return AlertDialog(
+        title: const Text('Key Easing'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            DropdownButton<String>(
+              value: selected,
+              items: presetNames.map((e)=> DropdownMenuItem(value: e, child: Text(e))).toList(),
+              onChanged: (v){ selected = v ?? selected; setState((){}); },
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              decoration: const InputDecoration(
+                labelText: 'Custom cubic-bezier (cubic(x1,y1,x2,y2))',
+                hintText: '예: cubic(0.33,0,0.67,1)'
+              ),
+              onChanged: (v)=> custom = v.trim(),
+            ),
+            const SizedBox(height: 4),
+            Text('또는 프리셋에서 선택', style: Theme.of(context).textTheme.bodySmall),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: ()=> Navigator.pop(ctx), child: const Text('취소')),
+          TextButton(onPressed: () async {
+            if (custom.isNotEmpty) {
+              selected = custom;
+            } else if (repo.easingPresets.containsKey(selected)) {
+              selected = repo.easingPresets[selected]!;
+            }
+            Navigator.pop(ctx, selected);
+          }, child: const Text('적용')),
+        ],
+      );
+    });
+
+    if (chosen == null) return;
+
+    final list = List<Instance>.from(seq.instances);
+    var it = list[idx];
+    final t = curT.round();
+    Easing? easing = Easing(chosen);
+
+    // Helper to set easing on a key at time k
+    KeyF<T> _withEase<T>(KeyF<T> k) => KeyF<T>(k.t, k.v, easing: easing);
+
+    if (boneMode) {
+      final bid = selectedBoneId; if (bid == null) return;
+      final tr = it.boneTracks[bid]; if (tr == null) return;
+      final m = Map<String, TrackTransform>.from(it.boneTracks);
+      if (_tool == 'move') {
+        final keys = List<KeyF<Vec2>>.from(tr.pos);
+        final i = keys.indexWhere((k)=> k.t==t);
+        if (i>=0) { keys[i] = _withEase(keys[i]); m[bid] = TrackTransform(pos: keys, rotDeg: tr.rotDeg, scale: tr.scale); }
+      } else if (_tool == 'rotate') {
+        final keys = List<KeyF<double>>.from(tr.rotDeg);
+        final i = keys.indexWhere((k)=> k.t==t);
+        if (i>=0) { keys[i] = _withEase(keys[i]); m[bid] = TrackTransform(pos: tr.pos, rotDeg: keys, scale: tr.scale); }
+      } else if (_tool == 'scale') {
+        final keys = List<KeyF<Vec2>>.from(tr.scale);
+        final i = keys.indexWhere((k)=> k.t==t);
+        if (i>=0) { keys[i] = _withEase(keys[i]); m[bid] = TrackTransform(pos: tr.pos, rotDeg: tr.rotDeg, scale: keys); }
+      }
+      list[idx] = it.copyWith(boneTracks: m);
+    } else {
+      if (it.baseTrack==null) return;
+      final bt = it.baseTrack!;
+      if (_tool == 'move') {
+        final keys = List<KeyF<Vec2>>.from(bt.pos);
+        final i = keys.indexWhere((k)=> k.t==t);
+        if (i>=0) { keys[i] = _withEase(keys[i]); list[idx] = it.copyWith(baseTrack: TrackTransform(pos: keys, rotDeg: bt.rotDeg, scale: bt.scale)); }
+      } else if (_tool == 'rotate') {
+        final keys = List<KeyF<double>>.from(bt.rotDeg);
+        final i = keys.indexWhere((k)=> k.t==t);
+        if (i>=0) { keys[i] = _withEase(keys[i]); list[idx] = it.copyWith(baseTrack: TrackTransform(pos: bt.pos, rotDeg: keys, scale: bt.scale)); }
+      } else if (_tool == 'scale') {
+        final keys = List<KeyF<Vec2>>.from(bt.scale);
+        final i = keys.indexWhere((k)=> k.t==t);
+        if (i>=0) { keys[i] = _withEase(keys[i]); list[idx] = it.copyWith(baseTrack: TrackTransform(pos: bt.pos, rotDeg: bt.rotDeg, scale: keys)); }
+      }
+    }
+    _commitInstances(list, 'Set Key Easing');
+  }
+
+  void _onTick(Duration elapsed) {
+    if (!playing) return;
+    if (_lastTick == Duration.zero) { _lastTick = elapsed; return; }
+    final d = elapsed - _lastTick;
+    _lastTick = elapsed;
+    final dsec = d.inMicroseconds / 1e6;
+    final framesFloat = dsec * seq.setting.fps * seq.setting.playbackRate;
+    _frameAcc += framesFloat;
+    int step = _frameAcc.floor();
+    if (step <= 0) return;
+    _frameAcc -= step;
+    int cur = curT.round();
+    if (loopEnabled) {
+      final a = loopStart.clamp(1, totalFrames);
+      final b = loopEnd.clamp(1, totalFrames);
+      final len = (b - a + 1).clamp(1, totalFrames);
+      final pos = ((cur - a + step) % len + len) % len;
+      setState(()=> curT = (a + pos).toDouble());
+    } else {
+      cur = ((cur - 1 + step) % totalFrames) + 1;
+      setState(()=> curT = cur.toDouble());
+    }
+  }
+
+  void _addStickFighter() {
+    final models = context.read<AppState>().repo.models;
+    if (!models.containsKey('stickman')) return;
+    final cx = (seq.setting.width / 2).toDouble();
+    final cy = (seq.setting.height / 2).toDouble();
+    final inst = Instance(
+      id: const Uuid().v4(),
+      name: 'Stickman',
+      modelId: 'stickman',
+      base: Transform2D(pos: Vec2(cx, cy)),
+    );
+    _commitInstances([...seq.instances, inst], 'Add Stick');
+    setState(()=> selectedId = inst.id);
+  }
+
+  // Removed duplicate demo adder; Stick Fighter button covers the use case.
+
+  void _nextFrame() {
+    final cur = curT.round();
+    final nf = (cur + 1).clamp(1, totalFrames);
+    // In Stick Mode, auto-duplicate current keys to next frame if missing
+    if (stickMode && autoKey && selectedId != null) {
+      final hasNext = _hasKeyAtFrame(nf);
+      if (!hasNext) {
+        _duplicateKeysToNext();
+      }
+    }
+    setState(()=> curT = nf.toDouble());
+  }
+
+  void _prevFrame() {
+    final cur = curT.round();
+    final pf = (cur - 1).clamp(1, totalFrames);
+    setState(()=> curT = pf.toDouble());
+  }
+
+  // Determine if the currently selected component has a key at the given frame for the active tool
+  bool _hasKeyAtFrame(int frame) {
+    if (selectedId == null) return false;
+    final idx = seq.instances.indexWhere((x)=> x.id==selectedId);
+    if (idx < 0) return false;
+    final it = seq.instances[idx];
+    if (boneMode) {
+      final bid = selectedBoneId; if (bid == null) return false;
+      final tr = it.boneTracks[bid] ?? const TrackTransform();
+      if (_tool == 'move') return tr.pos.any((k)=> k.t == frame);
+      if (_tool == 'rotate') return tr.rotDeg.any((k)=> k.t == frame);
+      if (_tool == 'scale') return tr.scale.any((k)=> k.t == frame);
+      return false;
+    } else {
+      final bt = it.baseTrack;
+      if (bt == null) return false;
+      if (_tool == 'move') return bt.pos.any((k)=> k.t == frame);
+      if (_tool == 'rotate') return bt.rotDeg.any((k)=> k.t == frame);
+      if (_tool == 'scale') return bt.scale.any((k)=> k.t == frame);
+      return false;
+    }
+  }
+
+  void _toggleStickMode() {
+    setState(() {
+      stickMode = !stickMode;
+      if (stickMode) {
+        // Enable common Stick Fighter workflow prefs
+        showOnion = true;
+        autoKey = true;
+        snapToFrames = true;
+        angleSnap = true;
+        if (seq.setting.interpolate) {
+          final newSetting = seq.setting.copyWith(interpolate: false);
+          _commitInstances(seq.instances, 'Enable Stick Mode', settingOverride: newSetting);
+        }
+      }
+    });
+  }
+
+  void _insertFrames() {
+    final start = loopEnabled ? loopStart : curT.round();
+    final count = loopEnabled ? (loopEnd - loopStart + 1).clamp(1, 100000) : 1;
+    final list = _shiftKeys(seq.instances, start, count);
+    final newSetting = seq.setting.copyWith(totalFrames: seq.setting.totalFrames + count);
+    _commitInstances(list, 'Insert Frames', settingOverride: newSetting);
+    setState(()=> curT = (start + count).toDouble());
+  }
+
+  void _deleteFrames() {
+    final start = loopEnabled ? loopStart : curT.round();
+    final end = loopEnabled ? loopEnd : curT.round();
+    if (start > end) return;
+    final count = (end - start + 1).clamp(1, 100000);
+    final afterDelete = _removeKeysInRange(seq.instances, start, end);
+    final shifted = _shiftKeys(afterDelete, end + 1, -count);
+    final newLen = (seq.setting.totalFrames - count).clamp(1, 1000000);
+    final newSetting = seq.setting.copyWith(totalFrames: newLen);
+    _commitInstances(shifted, 'Delete Frames', settingOverride: newSetting);
+    final newT = start.clamp(1, newLen);
+    setState(()=> curT = newT.toDouble());
+  }
+  Future<void> _holdFrames() async {
+    // Prompt count
+    final controller = TextEditingController(text: '1');
+    final count = await showDialog<int>(context: context, builder: (ctx){
+      return AlertDialog(
+        title: const Text('Hold (Expose) Frames'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(hintText: 'Number of frames to hold (>=1)'),
+        ),
+        actions: [
+          TextButton(onPressed: ()=> Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () {
+              final n = int.tryParse(controller.text.trim());
+              if (n != null && n >= 1) {
+                Navigator.pop(ctx, n);
+              } else {
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text('Apply'),
+          ),
+        ],
+      );
+    });
+    if (count == null || count < 1) return;
+    final start = curT.round();
+    // Shift timeline by count and copy current pose into each inserted frame
+    var list = _shiftKeys(seq.instances, start + 1, count);
+    for (int i=0; i<count; i++) {
+      list = _copyFrame(list, start, start + 1 + i);
+    }
+    final newSetting = seq.setting.copyWith(totalFrames: seq.setting.totalFrames + count);
+    _commitInstances(list, 'Hold Frames', settingOverride: newSetting);
+    setState(()=> curT = (start + count).toDouble());
+  }
+
+  // Duplicate Frame removed; use Hold Frames with count=1 instead.
+
+  // Copy pose/keys at src frame and set as keys at dst for all instances
+  List<Instance> _copyFrame(List<Instance> instances, int src, int dst) {
+    return instances.map((it){
+      TrackTransform? bt = it.baseTrack;
+      bt ??= TrackTransform(
+        pos: [KeyF<Vec2>(1, it.base.pos)],
+        rotDeg: [KeyF<double>(1, it.base.rotDeg)],
+        scale: [KeyF<Vec2>(1, it.base.scale)],
+      );
+      // sample current values
+      final baseNow = sampleTransform(bt, src.toDouble(), interpolate: seq.setting.interpolate);
+      final pos = List<KeyF<Vec2>>.from(bt.pos);
+      final rot = List<KeyF<double>>.from(bt.rotDeg);
+      final sc = List<KeyF<Vec2>>.from(bt.scale);
+      void upsertVec2(List<KeyF<Vec2>> keys, int frame, Vec2 value) {
+        final index = keys.indexWhere((key) => key.t == frame);
+        _upsertKey(keys, index, KeyF<Vec2>(frame, value));
+      }
+
+      void upsertDouble(List<KeyF<double>> keys, int frame, double value) {
+        final index = keys.indexWhere((key) => key.t == frame);
+        _upsertKey(keys, index, KeyF<double>(frame, value));
+      }
+
+      upsertVec2(pos, dst, baseNow.pos);
+      upsertDouble(rot, dst, baseNow.rotDeg);
+      upsertVec2(sc, dst, baseNow.scale);
+
+      final newBones = <String, TrackTransform>{};
+      it.boneTracks.forEach((id, tr) {
+        final curPos = tr.pos.isEmpty ? const Vec2(0, 0) : sampleVec2D(tr.pos, src.toDouble());
+        final curRot = tr.rotDeg.isEmpty ? 0.0 : sampleScalarD(tr.rotDeg, src.toDouble());
+        final curSc = tr.scale.isEmpty ? const Vec2(1, 1) : sampleVec2D(tr.scale, src.toDouble());
+        final p = List<KeyF<Vec2>>.from(tr.pos);
+        upsertVec2(p, dst, curPos);
+        final r = List<KeyF<double>>.from(tr.rotDeg);
+        upsertDouble(r, dst, curRot);
+        final s = List<KeyF<Vec2>>.from(tr.scale);
+        upsertVec2(s, dst, curSc);
+        newBones[id] = TrackTransform(pos: p, rotDeg: r, scale: s);
+      });
+      final newAtt = <String, AttTrack>{};
+      it.attachmentTracks.forEach((id, tr) {
+        final curSc = tr.scale.isEmpty ? const Vec2(1, 1) : sampleVec2D(tr.scale, src.toDouble());
+        final curOp = tr.opacity.isEmpty ? 1.0 : sampleScalarD(tr.opacity, src.toDouble());
+        final curTi = tr.tint.isEmpty
+            ? 0xFFFFFFFF
+            : (tr.tint..sort((a, b) => a.t.compareTo(b.t))).last.v;
+        final curFr = tr.frameIndex.isEmpty ? 0.0 : sampleScalarD(tr.frameIndex, src.toDouble());
+
+        final scaleKeys = List<KeyF<Vec2>>.from(tr.scale);
+        upsertVec2(scaleKeys, dst, curSc);
+        final opacityKeys = List<KeyF<double>>.from(tr.opacity);
+        upsertDouble(opacityKeys, dst, curOp);
+        final tintKeys = List<KeyF<int>>.from(tr.tint);
+        final tintIndex = tintKeys.indexWhere((key) => key.t == dst);
+        _upsertKey(tintKeys, tintIndex, KeyF<int>(dst, curTi));
+        final frameKeys = List<KeyF<double>>.from(tr.frameIndex);
+        upsertDouble(frameKeys, dst, curFr);
+
+        newAtt[id] = AttTrack(
+          scale: scaleKeys,
+          opacity: opacityKeys,
+          tint: tintKeys,
+          frameIndex: frameKeys,
+        );
+      });
+      return it.copyWith(baseTrack: TrackTransform(pos: pos, rotDeg: rot, scale: sc), boneTracks: newBones, attachmentTracks: newAtt);
+    }).toList();
+  }
+
+  List<Instance> _shiftKeys(List<Instance> instances, int from, int delta) {
+    List<KeyF<T>> shiftList<T>(List<KeyF<T>> source) {
+      return source
+          .map((key) {
+            final next = key.t >= from ? key.t + delta : key.t;
+            return KeyF<T>(next, key.v, easing: key.easing);
+          })
+          .where((key) => key.t >= 1)
+          .toList();
+    }
+
+    return instances.map((instance) {
+      final baseTrack = instance.baseTrack;
+      final shiftedBase = baseTrack == null
+          ? null
+          : TrackTransform(
+              pos: shiftList(baseTrack.pos),
+              rotDeg: shiftList(baseTrack.rotDeg),
+              scale: shiftList(baseTrack.scale),
+            );
+      final shiftedBones = <String, TrackTransform>{};
+      instance.boneTracks.forEach((id, track) {
+        shiftedBones[id] = TrackTransform(
+          pos: shiftList(track.pos),
+          rotDeg: shiftList(track.rotDeg),
+          scale: shiftList(track.scale),
+        );
+      });
+      final shiftedAttachments = <String, AttTrack>{};
+      instance.attachmentTracks.forEach((id, track) {
+        shiftedAttachments[id] = AttTrack(
+          scale: shiftList(track.scale),
+          opacity: shiftList(track.opacity),
+          tint: shiftList(track.tint),
+          frameIndex: shiftList(track.frameIndex),
+        );
+      });
+      return instance.copyWith(
+        baseTrack: shiftedBase,
+        boneTracks: shiftedBones,
+        attachmentTracks: shiftedAttachments,
+      );
+    }).toList();
+  }
+
+  List<Instance> _removeKeysInRange(List<Instance> instances, int start, int end) {
+    bool withinRange(int frame) => frame >= start && frame <= end;
+    List<KeyF<T>> removeKeys<T>(List<KeyF<T>> source) =>
+        source.where((key) => !withinRange(key.t)).toList();
+
+    return instances.map((instance) {
+      final baseTrack = instance.baseTrack;
+      final filteredBase = baseTrack == null
+          ? null
+          : TrackTransform(
+              pos: removeKeys(baseTrack.pos),
+              rotDeg: removeKeys(baseTrack.rotDeg),
+              scale: removeKeys(baseTrack.scale),
+            );
+      final filteredBones = <String, TrackTransform>{};
+      instance.boneTracks.forEach((id, track) {
+        filteredBones[id] = TrackTransform(
+          pos: removeKeys(track.pos),
+          rotDeg: removeKeys(track.rotDeg),
+          scale: removeKeys(track.scale),
+        );
+      });
+      final filteredAttachments = <String, AttTrack>{};
+      instance.attachmentTracks.forEach((id, track) {
+        filteredAttachments[id] = AttTrack(
+          scale: removeKeys(track.scale),
+          opacity: removeKeys(track.opacity),
+          tint: removeKeys(track.tint),
+          frameIndex: removeKeys(track.frameIndex),
+        );
+      });
+      return instance.copyWith(
+        baseTrack: filteredBase,
+        boneTracks: filteredBones,
+        attachmentTracks: filteredAttachments,
+      );
+    }).toList();
+  }
+
+  void _fitLengthToKeys() {
+    int last = 1;
+    for (final it in seq.instances) {
+      void maxTInt(int value) {
+        if (value > last) {
+          last = value;
+        }
+      }
+
+      final baseTrack = it.baseTrack;
+      if (baseTrack != null) {
+        for (final key in baseTrack.pos) {
+          maxTInt(key.t);
+        }
+        for (final key in baseTrack.rotDeg) {
+          maxTInt(key.t);
+        }
+        for (final key in baseTrack.scale) {
+          maxTInt(key.t);
+        }
+      }
+
+      for (final track in it.boneTracks.values) {
+        for (final key in track.pos) {
+          maxTInt(key.t);
+        }
+        for (final key in track.rotDeg) {
+          maxTInt(key.t);
+        }
+        for (final key in track.scale) {
+          maxTInt(key.t);
+        }
+      }
+
+      for (final attachment in it.attachmentTracks.values) {
+        for (final key in attachment.scale) {
+          maxTInt(key.t);
+        }
+        for (final key in attachment.opacity) {
+          maxTInt(key.t);
+        }
+        for (final key in attachment.tint) {
+          maxTInt(key.t);
+        }
+        for (final key in attachment.frameIndex) {
+          maxTInt(key.t);
+        }
+      }
+    }
+    final needed = last.clamp(1, 1000000);
+    if (needed != seq.setting.totalFrames) {
+      final newSetting = seq.setting.copyWith(totalFrames: needed);
+      _commitInstances(seq.instances, 'Fit Length', settingOverride: newSetting);
+    }
+  }
+
+  Future<void> _promptSetTotalFrames() async {
+    final controller = TextEditingController(text: seq.setting.totalFrames.toString());
+    final v = await showDialog<int>(context: context, builder: (ctx) {
+      return AlertDialog(
+        title: const Text('Set Total Frames'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(hintText: 'Enter total frames (>=1)'),
+        ),
+        actions: [
+          TextButton(onPressed: ()=> Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(onPressed: (){
+            final n = int.tryParse(controller.text.trim());
+            if (n != null && n >= 1) {
+              Navigator.pop(ctx, n);
+            } else {
+              Navigator.pop(ctx);
+            }
+          }, child: const Text('Apply')),
+        ],
+      );
+    });
+    if (v != null && v >= 1) {
+      final newSetting = seq.setting.copyWith(totalFrames: v);
+      _commitInstances(seq.instances, 'Set Length', settingOverride: newSetting);
+      if (curT > v) setState(()=> curT = v.toDouble());
+    }
+  }
+
+  Future<void> _autoSaveNow({String? reason}) async {
+    try {
+      final repo = context.read<AppState>().repo;
+      final proj = Project(
+        id: widget.project.id,
+        name: widget.project.name,
+        sequences: widget.project.sequences.map((s) => s.id == seq.id ? seq : s).toList(),
+      );
+      await repo.upsertProject(proj);
+      await repo.autoSaveProjectSnapshot(proj);
+      
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    _ticker?.dispose();
+    _periodicAutoSave?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _toolsEntry?.remove();
+    _toolsPos.dispose();
+    super.dispose();
+  }
+}
+
+class _ExportOpts {
+  final String resPreset;
+  final int fps;
+  final bool useLoop;
+  _ExportOpts({required this.resPreset, required this.fps, required this.useLoop});
+}
+
+// Simple bouncy icon used in toolbars (top-level)
+class _BouncyIcon extends StatefulWidget {
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback? onTap;
+  final Color? color;
+  const _BouncyIcon({required this.tooltip, required this.icon, this.onTap, this.color});
+
+  @override
+  State<_BouncyIcon> createState() => _BouncyIconState();
+}
+
+class _BouncyIconState extends State<_BouncyIcon> {
+  bool _pressed = false;
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: widget.tooltip,
+      child: GestureDetector(
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapCancel: () => setState(() => _pressed = false),
+        onTapUp: (_) {
+          setState(() => _pressed = false);
+          widget.onTap?.call();
+        },
+        child: AnimatedScale(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.elasticOut,
+          scale: _pressed ? 0.88 : 1.0,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4.0),
+            child: Icon(widget.icon, color: widget.color),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+
+

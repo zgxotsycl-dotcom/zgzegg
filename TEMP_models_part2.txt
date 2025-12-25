@@ -1,0 +1,54 @@
+  final int nextFrames;
+  final double opacityFalloff;
+  final Color prevColor;
+  final Color nextColor;
+  const OnionSkinSetting({
+    this.prevFrames = 3,
+    this.nextFrames = 3,
+    this.opacityFalloff = 0.6,
+    this.prevColor = const Color(0x44FF0000),
+    this.nextColor = const Color(0x440000FF),
+  });
+}
+
+class Sequence {
+  final String id;
+  final String name;
+  final SequenceSetting setting;
+  final OnionSkinSetting onion;
+  final List<Instance> instances;
+  final List<AudioTrack> audio;
+  const Sequence({
+    required this.id,
+    required this.name,
+    required this.setting,
+    required this.onion,
+    required this.instances,
+    required this.audio,
+  });
+
+  Sequence copyWith({
+    String? id,
+    String? name,
+    SequenceSetting? setting,
+    OnionSkinSetting? onion,
+    List<Instance>? instances,
+    List<AudioTrack>? audio,
+  }) => Sequence(
+        id: id ?? this.id,
+        name: name ?? this.name,
+        setting: setting ?? this.setting,
+        onion: onion ?? this.onion,
+        instances: instances ?? this.instances,
+        audio: audio ?? this.audio,
+      );
+}
+
+class Project {
+  final String id;
+  final String name;
+  final List<Sequence> sequences;
+  final int lastOpened; // epoch millis for recent-sort
+  final bool favorite; // pinned to top
+  const Project({required this.id, required this.name, required this.sequences, this.lastOpened = 0, this.favorite = false});
+}

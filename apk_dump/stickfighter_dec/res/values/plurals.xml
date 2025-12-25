@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <plurals name="frame_count">
+        <item quantity="other">%d frames</item>
+        <item quantity="one">%d frame</item>
+    </plurals>
+</resources>

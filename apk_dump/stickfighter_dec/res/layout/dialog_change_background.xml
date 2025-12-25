@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout android:layout_width="fill_parent" android:layout_height="wrap_content"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <LinearLayout android:orientation="vertical" android:layout_width="@dimen/modify_figure_dialog_width" android:layout_height="wrap_content">
+        <android.support.v4.view.ViewPager android:id="@id/viewPager" android:layout_width="@dimen/modify_figure_dialog_width" android:layout_height="220.0dip" />
+        <RelativeLayout android:layout_width="@dimen/modify_figure_dialog_width" android:layout_height="wrap_content">
+            <Button android:textColor="@color/accent" android:id="@id/okButton" android:background="@null" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="8.0dip" android:layout_marginRight="16.0dip" android:minWidth="48.0dip" android:minHeight="48.0dip" android:text="@string/apply" android:layout_alignParentRight="true" android:textAllCaps="true" />
+            <Button android:textColor="@color/accent" android:id="@id/cancelButton" android:background="@null" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="8.0dip" android:layout_marginRight="24.0dip" android:minWidth="48.0dip" android:minHeight="48.0dip" android:text="@string/cancel" android:layout_toLeftOf="@id/okButton" android:textAllCaps="true" />
+        </RelativeLayout>
+    </LinearLayout>
+</FrameLayout>

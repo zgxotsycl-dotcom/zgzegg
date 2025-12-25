@@ -1,0 +1,70 @@
+import 'package:flutter/material.dart';
+
+class FloatingToolsSurface extends StatelessWidget {
+  final void Function(Offset delta) onDrag;
+  final bool autoKey;
+  final bool boneMode;
+  final VoidCallback onToggleAutoKey;
+  final VoidCallback onToggleBoneMode;
+  final String tool;
+  final void Function(int index) onToolChange;
+  const FloatingToolsSurface({
+    super.key,
+    required this.onDrag,
+    required this.autoKey,
+    required this.boneMode,
+    required this.onToggleAutoKey,
+    required this.onToggleBoneMode,
+    required this.tool,
+    required this.onToolChange,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // Streamlined: removed dedicated 'scale' tool (lasso has scale handle)
+    final modes = const ['smart','move','rotate','ik','lasso'];
+    final selected = modes.map((m) => tool==m).toList();
+    final isNarrow = MediaQuery.of(context).size.width < 600;
+    final minBtn = isNarrow ? 44.0 : 36.0;
+    final iconSize = isNarrow ? 20.0 : 18.0;
+    return RepaintBoundary(
+      child: GestureDetector(
+        onPanUpdate: (d) => onDrag(d.delta),
+        child: Material(
+          elevation: 8,
+          borderRadius: BorderRadius.circular(12),
+          color: Theme.of(context).colorScheme.surface.withOpacity(0.92),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.drag_handle, size: 16),
+                const SizedBox(width: 6),
+                ToggleButtons(
+                  constraints: BoxConstraints(minHeight: minBtn, minWidth: minBtn),
+                  isSelected: selected,
+                  onPressed: onToolChange,
+                  children: [
+                    Icon(Icons.auto_fix_high, size: iconSize),
+                    Icon(Icons.open_with, size: iconSize),
+                    Icon(Icons.rotate_right, size: iconSize),
+                    Icon(Icons.ads_click, size: iconSize),
+                    Icon(Icons.gesture, size: iconSize),
+                  ],
+                ),
+                IconButton(
+                  tooltip: autoKey ? 'Auto Key: ON' : 'Auto Key: OFF',
+                  onPressed: onToggleAutoKey,
+                  icon: Icon(autoKey ? Icons.fiber_manual_record : Icons.fiber_manual_record_outlined, size: iconSize),
+                  color: autoKey ? Colors.redAccent : null,
+                ),
+                // Bone mode 토글은 Stick Fighter UX에 맞게 숨김 처리
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

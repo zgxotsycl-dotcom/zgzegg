@@ -1,0 +1,100 @@
+import 'package:uuid/uuid.dart';
+import 'package:file_picker/file_picker.dart';
+import 'dart:io';
+import 'package:share_plus/share_plus.dart';
+import 'package:saver_gallery/saver_gallery.dart';
+
+// Adaptive menu actions for narrow AppBar popup
+enum _MenuAction {
+  fit,
+  setLen,
+  interpolate,
+  stickMode,
+  stickProfile,
+  insert,
+  delete,
+  hold,
+  snap,
+  angleSnap,
+  hierarchy,
+  onion,
+  audio,
+  boneMode,
+  keyPos,
+  keyRot,
+  keyScale,
+  keyEasing,
+  dupNext,
+  exportPng,
+  exportMp4,
+  exportSma,
+  undo,
+  redo,
+  mirror,
+  poses,
+  style,
+  addStick,
+  preview,
+}
+
+class AnimationEditorScreen extends StatefulWidget {
+  final Project project;
+  final Sequence sequence;
+  const AnimationEditorScreen({super.key, required this.project, required this.sequence});
+
+  @override
+  State<AnimationEditorScreen> createState() => _AnimationEditorScreenState();
+}
+
+class _AnimationEditorScreenState extends State<AnimationEditorScreen> with WidgetsBindingObserver {
+  late Sequence seq;
+  double curT = 1;
+  int get totalFrames => seq.setting.totalFrames;
+  bool playing = false;
+  bool exporting = false;
+  bool showTimeline = true;
+  bool loopEnabled = false;
+  int loopStart = 1;
+  int loopEnd = 60;
+  Timer? _saveDebounce;
+  bool showHierarchy = true;
+  bool showOnion = true;
+  // Optional end-cap editor dock
+  bool showEndCaps = true;
+  bool _linkLR = true; // Apply L/R together
+  bool _mirrorXForLR = true; // Mirror X when applying to counterpart
+  String? selectedId;
+  String _tool = 'smart'; // smart | move | rotate | scale | ik | lasso
+  bool boneMode = false;
+  String? selectedBoneId;
+  final UndoStack _undo = UndoStack();
+  bool autoKey = true;
+  Ticker? _ticker;
+  Duration _lastTick = Duration.zero;
+  double _frameAcc = 0.0;
+  Timer? _periodicAutoSave;
+  bool snapToFrames = true;
+  bool angleSnap = true; // 15-degree snap for rotate tools
+  // Stick Fighter workflow toggle
+  bool stickMode = true;
+  // Coalesced interaction state
+  bool _coalescing = false;
+  Sequence? _seqBefore;
+
+  @override
+  void initState() {
+    super.initState();
+    seq = widget.sequence;
+    // 편집 시작 시 인스턴스가 하나라도 있으면 자동 선택해 조작 가능하게 함
+    if (seq.instances.isNotEmpty) {
+      selectedId = seq.instances.first.id;
+    }
+    _ticker = Ticker(_onTick);
+    WidgetsBinding.instance.addObserver(this);
+    _periodicAutoSave = Timer.periodic(const Duration(seconds: 15), (_) => _autoSaveNow(reason: 'periodic'));
+    _ensureToolsOverlay();
+  }
+  
+  // Adaptive actions for narrow/wide layouts
+  List<Widget> _buildNarrowActions(BuildContext context) {
+    return [

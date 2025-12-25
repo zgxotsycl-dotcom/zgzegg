@@ -1,0 +1,120 @@
+import 'dart:typed_data';
+import 'dart:ui' as ui;
+import 'package:flutter/material.dart' show Colors;
+import 'package:vector_math/vector_math_64.dart' as vm;
+import '../data/models.dart';
+import 'animation_engine.dart';
+import 'skeleton.dart';
+
+class Renderer {
+  static ui.Image paintFrame({
+    required Sequence seq,
+    required Map<String, Model> models,
+    required Map<String, ui.Image> images,
+    required double tFrame,
+    required ui.Size size,
+    bool interpolate = true,
+    bool showHelperJoints = true,
+    bool drawGrid = true,
+  }) {
+    final recorder = ui.PictureRecorder();
+    final canvas = ui.Canvas(recorder);
+
+    // Background: image cover or solid color
+    final bgColor = seq.setting.backgroundColor;
+    final bgPaint = ui.Paint()..color = bgColor;
+    canvas.drawRect(ui.Rect.fromLTWH(0, 0, size.width, size.height), bgPaint);
+    final bgImgPath = seq.setting.backgroundImage;
+    if (bgImgPath != null) {
+      final bgImg = images[bgImgPath];
+      if (bgImg != null) {
+        final iw = bgImg.width.toDouble();
+        final ih = bgImg.height.toDouble();
+        final sx = size.width / iw;
+        final sy = size.height / ih;
+        final s = sx > sy ? sx : sy; // cover
+        final dw = iw * s;
+        final dh = ih * s;
+        final dx = (size.width - dw) * 0.5;
+        final dy = (size.height - dh) * 0.5;
+        final src = ui.Rect.fromLTWH(0, 0, iw, ih);
+        final dst = ui.Rect.fromLTWH(dx, dy, dw, dh);
+        final p = ui.Paint()..filterQuality = ui.FilterQuality.medium;
+        canvas.drawImageRect(bgImg, src, dst, p);
+      }
+    }
+
+    // Background grid (optional)
+    if (drawGrid) {
+      final grid = ui.Paint()
+        ..color = const ui.Color(0xFFEFEFEF)
+        ..strokeWidth = 1;
+      for (double x = 0; x < size.width; x += 20) {
+        canvas.drawLine(ui.Offset(x, 0), ui.Offset(x, size.height), grid);
+      }
+      for (double y = 0; y < size.height; y += 20) {
+        canvas.drawLine(ui.Offset(0, y), ui.Offset(size.width, y), grid);
+      }
+    }
+
+    // Onion skin: draw prev/next frames with tint + falloff
+    final prevN = seq.onion.prevFrames;
+    final nextN = seq.onion.nextFrames;
+    for (int k = prevN; k >= 1; k--) {
+      final tt = ((tFrame - k).clamp(1.0, double.infinity) as num).toDouble();
+      final alpha = _onionAlpha(seq.onion.opacityFalloff, k);
+    for (final inst in seq.instances) {
+      if (inst.visible == false) continue;
+      final model = models[inst.modelId];
+      if (model == null) continue;
+      _paintModel(canvas, inst, model, tt, images, seq, interpolate, tint: seq.onion.prevColor.withAlpha((alpha * 255).toInt()), showHelperJoints: showHelperJoints);
+    }
+    }
+    for (int k = 1; k <= nextN; k++) {
+      final tt = (tFrame + k).toDouble();
+      final alpha = _onionAlpha(seq.onion.opacityFalloff, k);
+    for (final inst in seq.instances) {
+      if (inst.visible == false) continue;
+      final model = models[inst.modelId];
+      if (model == null) continue;
+      _paintModel(canvas, inst, model, tt, images, seq, interpolate, tint: seq.onion.nextColor.withAlpha((alpha * 255).toInt()), showHelperJoints: showHelperJoints);
+    }
+    }
+
+    // Draw current frame
+    for (final inst in seq.instances) {
+      if (inst.visible == false) continue;
+      final model = models[inst.modelId];
+      if (model == null) continue;
+      _paintModel(canvas, inst, model, tFrame, images, seq, interpolate, instances: seq.instances, showHelperJoints: showHelperJoints);
+    }
+
+    final pic = recorder.endRecording();
+    return pic.toImageSync(size.width.toInt(), size.height.toInt());
+  }
+
+  static void _paintModel(ui.Canvas canvas, Instance inst, Model model, double t, Map<String, ui.Image> images, Sequence seq, bool interpolate, {ui.Color? tint, List<Instance>? instances, bool showHelperJoints = true}) {
+    if (model.id == 'stickman' || _isStickFigure(model)) {
+      _paintStickman(canvas, inst, model, t, seq, interpolate, tint: tint, instances: instances, showHelperJoints: showHelperJoints);
+      return;
+    }
+    final pose = <String, Transform2D>{};
+    final rigidRotOnly = model.id == 'stickman';
+    // Build pose from tracks then override position with anchor when present (anchor -> rot -> fallback)
+    final byId = {for (final b in model.bones) b.id: b};
+    for (final b in model.bones) {
+      final trSrc = inst.boneTracks[b.id];
+      final tr = trSrc == null ? const Transform2D() : sampleTransform(trSrc, t, interpolate: interpolate);
+      final anchor = _sampleAnchorStep(inst.anchorTracks[b.id], t);
+      if (rigidRotOnly) {
+        pose[b.id] = Transform2D(pos: anchor ?? const Vec2(0, 0), rotDeg: tr.rotDeg, scale: const Vec2(1, 1));
+      } else {
+        pose[b.id] = Transform2D(pos: anchor ?? tr.pos, rotDeg: tr.rotDeg, scale: tr.scale);
+      }
+    }
+    final cache = <String, vm.Matrix4>{};
+    final bones = byId;
+
+    // Instance world including parenting and pivot
+    final byId = {for (final x in (instances ?? const <Instance>[])) x.id: x};
+    final instWorld = _instanceWorld(inst, byId, t, interpolate);

@@ -1,0 +1,240 @@
+
+  // Floating draggable tools overlay with subtle animation
+  // Floating tools via OverlayEntry for drag performance
+  final ValueNotifier<Offset> _toolsPos = ValueNotifier(const Offset(-1, -1));
+  OverlayEntry? _toolsEntry;
+  void _ensureToolsOverlay() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final overlay = Overlay.of(context);
+      if (_toolsEntry != null) return;
+      final sz = MediaQuery.of(context).size;
+      if (_toolsPos.value.dx < 0) {
+        _toolsPos.value = Offset(sz.width - 160, sz.height - 220);
+      }
+      _toolsEntry = OverlayEntry(
+        builder: (ctx) => Stack(children: [
+          ValueListenableBuilder<Offset>(
+            valueListenable: _toolsPos,
+            builder: (ctx, pos, _) {
+              return Positioned(
+                left: pos.dx,
+                top: pos.dy,
+                child: FloatingToolsSurface(
+                  onDrag: (delta) {
+                    final w = MediaQuery.of(ctx).size.width;
+                    final h = MediaQuery.of(ctx).size.height;
+                    final nx = (pos.dx + delta.dx).clamp(0.0, w - 140);
+                    final ny = (pos.dy + delta.dy).clamp(80.0, h - 120);
+                    _toolsPos.value = Offset(nx, ny);
+                  },
+                  autoKey: autoKey,
+                  boneMode: boneMode,
+                  onToggleAutoKey: () => setState(() => autoKey = !autoKey),
+                  onToggleBoneMode: () => setState(() { boneMode = !boneMode; if (!boneMode) selectedBoneId = null; }),
+                  tool: _tool,
+                  onToolChange: (i) => setState(() => _tool = ['smart','move','rotate','scale','ik','lasso'][i]),
+                ),
+              );
+            },
+          ),
+        ]),
+      );
+      overlay.insert(_toolsEntry!);
+    });
+  }
+
+
+  void _mirrorPose() {
+    if (selectedId == null) return;
+    final idx = seq.instances.indexWhere((x)=> x.id==selectedId);
+    if (idx < 0) return;
+    final it = seq.instances[idx];
+    final t = curT.round();
+
+    // Sample current rotations, then mirror left<->right by flipping signs
+    double sampleRot(TrackTransform? tr) => tr == null || tr.rotDeg.isEmpty ? 0.0 : sampleScalarD(tr.rotDeg, t.toDouble());
+
+    final newBones = Map<String, TrackTransform>.from(it.boneTracks);
+    // Find pairs l_* and r_*
+    final ids = newBones.keys.toList();
+    final paired = <String>{};
+    for (final id in ids) {
+      if (paired.contains(id)) continue;
+      if (id.startsWith('l_')) {
+        final r = 'r_${id.substring(2)}';
+        if (newBones.containsKey(r)) {
+          final ltr = newBones[id];
+          final rtr = newBones[r];
+          final lrot = sampleRot(ltr);
+          final rrot = sampleRot(rtr);
+          // Write mirrored keys at t: right = -left, left = -right
+          TrackTransform setRot(TrackTransform? track, double rot) {
+            final src = track ?? const TrackTransform();
+            final rotations = List<KeyF<double>>.from(src.rotDeg);
+            final index = rotations.indexWhere((k) => k.t == t);
+            final key = KeyF<double>(t, rot);
+            _upsertKey(rotations, index, key);
+            return TrackTransform(pos: src.pos, rotDeg: rotations, scale: src.scale);
+          }
+          newBones[r] = setRot(rtr, -lrot);
+          newBones[id] = setRot(ltr, -rrot);
+          paired.addAll([id,r]);
+        }
+      } else if (id.startsWith('r_')) {
+        final l = 'l_${id.substring(2)}';
+        if (newBones.containsKey(l)) continue; // handled when l_* seen
+      }
+    }
+
+    final list = List<Instance>.from(seq.instances);
+    list[idx] = it.copyWith(boneTracks: newBones);
+    _commitInstances(list, 'Mirror Pose');
+  }
+
+  void _upsertKey<T>(List<KeyF<T>> keys, int index, KeyF<T> value) {
+    if (index >= 0) {
+      keys[index] = value;
+    } else {
+      keys.add(value);
+    }
+  }
+
+  List<DropdownMenuItem<String>> _boneItemsForSelected() {
+    final id = selectedId; if (id == null) return const [];
+    final inst = seq.instances.firstWhere((x)=> x.id==id);
+    final model = context.read<AppState>().repo.models[inst.modelId];
+    if (model == null) return const [];
+    return model.bones.map((b)=> DropdownMenuItem(value: b.id, child: Text(b.id))).toList();
+  }
+
+  List<int> _baseMarkers(){
+    if (selectedId == null) return const [];
+    final it = seq.instances.where((x)=> x.id==selectedId).cast<Instance?>().firstWhere((e)=> e!=null, orElse: ()=> null);
+    if (it == null) return const [];
+    if (boneMode) {
+      final bid = selectedBoneId; if (bid == null) return const [];
+      final tr = it.boneTracks[bid]; if (tr == null) return const [];
+      final s = <int>{};
+      for (final k in tr.pos) { s.add(k.t); }
+      for (final k in tr.rotDeg) { s.add(k.t); }
+      for (final k in tr.scale) { s.add(k.t); }
+      final list = s.toList()..sort();
+      return list;
+    }
+    final bt = it.baseTrack;
+    if (bt == null) return const [];
+    final s = <int>{};
+    for (final k in bt.pos) { s.add(k.t); }
+    for (final k in bt.rotDeg) { s.add(k.t); }
+    for (final k in bt.scale) { s.add(k.t); }
+    final list = s.toList()..sort();
+    return list;
+  }
+
+  // consolidated into single dispose at end of file
+
+  void _scheduleAutosave() {
+    _saveDebounce?.cancel();
+    _saveDebounce = Timer(const Duration(milliseconds: 800), () async {
+      final repo = context.read<AppState>().repo;
+      final proj = Project(
+        id: widget.project.id,
+        name: widget.project.name,
+        sequences: widget.project.sequences.map((s) => s.id == seq.id ? seq : s).toList(),
+      );
+      await repo.upsertProject(proj);
+      await repo.autoSaveProjectSnapshot(proj);
+      
+    });
+  }
+
+  @override
+  void setState(VoidCallback fn) {
+    super.setState(fn);
+    _scheduleAutosave();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isPortrait = MediaQuery.of(context).orientation == Orientation.portrait;
+    final size = MediaQuery.of(context).size;
+    final isNarrow = size.width < 600;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Animation: ${seq.name}'),
+        actions: isNarrow ? _buildNarrowActions(context) : _buildWideActions(context),
+      ),
+      body: Stack(children: [
+        Column(
+          children: [
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: Center(
+                  child: Stack(children: [
+                    StageViewport(
+                      seq: seq,
+                      models: context.read<AppState>().repo.models,
+                      images: context.read<AppState>().repo.images,
+                      t: curT,
+                      selectedId: selectedId,
+                      boneMode: boneMode,
+                      selectedBoneId: selectedBoneId,
+                      tool: _tool,
+                      // follow sequence interpolate preference for preview
+                      autoKey: autoKey,
+                      angleSnap: angleSnap,
+                      stickMode: stickMode,
+                      onQuickToolSelect: (name){ setState(()=> _tool = name); },
+                      onSelect: (id){ setState(()=> selectedId = id); },
+                      onSelectBone: (bid){ setState(()=> selectedBoneId = bid); },
+                      onChange: (updated) {
+                        final list = seq.instances.map((x) => x.id == updated.id ? updated : x).toList();
+                        if (_coalescing) {
+                          setState(()=> seq = seq.copyWith(instances: list));
+                        } else {
+                          _commitInstances(list, 'Gizmo $_tool');
+                        }
+                      },
+                      onInteractionStart: () {
+                        if (!_coalescing) {
+                          _coalescing = true;
+                          _seqBefore = seq;
+                        }
+                      },
+                      onInteractionEnd: (label) {
+                        if (_coalescing) {
+                          final before = _seqBefore!;
+                          final after = seq;
+                          _undo.push(UndoEntry(label, () { setState(()=> seq = before); }, () { setState(()=> seq = after); }));
+                          _coalescing = false;
+                          _seqBefore = null;
+                        }
+                      },
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+            if (showTimeline)
+              SimpleTimeline(
+                totalFrames: totalFrames,
+                current: curT,
+                onScrub: (v) => setState(() => curT = snapToFrames ? v.roundToDouble() : v),
+                oneBased: true,
+                playing: playing,
+                onPlayChanged: (b) {
+                  setState(() => playing = b);
+                  if (b) { _lastTick = Duration.zero; _ticker?.start(); } else { _ticker?.stop(); }
+                },
+                fps: seq.setting.fps,
+                playbackRate: seq.setting.playbackRate,
+                loopStart: loopEnabled ? loopStart : null,
+                loopEnd: loopEnabled ? loopEnd : null,
+                onLoopChanged: (rng) => setState(() {
+                  loopEnabled = true;
+                  loopStart = rng.start.round();
+                  loopEnd = rng.end.round();
+                }),
+                showLoopSlider: loopEnabled,

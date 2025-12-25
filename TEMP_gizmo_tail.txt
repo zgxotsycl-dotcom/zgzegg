@@ -1,0 +1,420 @@
+  _Pair? _findTwoBoneChain(Model model, String chosenId) {
+    final byId = {for (final b in model.bones) b.id: b};
+    final initialLower = byId[chosenId];
+    if (initialLower == null) return null;
+
+    Bone upper;
+    Bone lower;
+
+    if (initialLower.parentId != null) {
+      final parent = byId[initialLower.parentId!];
+      if (parent == null) {
+        return null;
+      }
+      upper = parent;
+      lower = initialLower;
+    } else {
+      final children = model.bones.where((x) => x.parentId == chosenId).toList();
+      if (children.isEmpty) return null;
+      children.sort((a, b) => _boneLength(model, b.id).compareTo(_boneLength(model, a.id)));
+      upper = initialLower;
+      final child = byId[children.first.id];
+      if (child == null) return null;
+      lower = child;
+    }
+    return _Pair(upper, lower);
+  }
+
+  double _boneLength(Model model, String boneId) {
+    // Prefer child bind offset magnitude
+    final child = model.bones.firstWhere(
+      (x) => x.parentId == boneId,
+      orElse: () => const Bone(id: '', parentId: null, pivot: Vec2(0,0), bind: Transform2D()),
+    );
+    if (child.id.isNotEmpty) {
+      final v = child.bind.pos;
+      final l = math.sqrt(v.x * v.x + v.y * v.y);
+      if (l > 1e-3) return l;
+    }
+    // Fallback: look for a line attachment under this bone
+    final att = model.attachments.firstWhere(
+      (a) => a.boneId == boneId && a.type == PrimType.line,
+      orElse: () => const Attachment(id: '', boneId: '', type: PrimType.line),
+    );
+    if (att.id.isNotEmpty) {
+      final b = att.b;
+      final l = math.sqrt(b.x * b.x + b.y * b.y);
+      if (l > 1e-3) return l;
+    }
+    return 60.0; // default
+  }
+
+  double _angleOfYAxis(vm.Matrix4 m) {
+    final x = m.entry(0, 1);
+    final y = m.entry(1, 1);
+    return math.atan2(y, x);
+  }
+
+  double _radToDeg(double r) => r * 180.0 / math.pi;
+
+  static Offset _tx(vm.Matrix4 m, Offset o) {
+    final v = m.transform3(vm.Vector3(o.dx, o.dy, 0));
+    return Offset(v.x, v.y);
+  }
+
+  Offset _worldToScreen(Offset w) => widget.viewportOffset + Offset(w.dx * widget.viewportScale, w.dy * widget.viewportScale);
+
+  static vm.Matrix4 _instanceWorld(List<Instance> instances, Instance inst, double t, bool interpolate) {
+    vm.Matrix4 acc = vm.Matrix4.identity();
+    final byId = {for (final x in instances) x.id: x};
+    // Build chain
+    final chain = <Instance>[];
+    Instance? cur = inst;
+    final visited = <String>{};
+    while (cur != null) {
+      if (visited.contains(cur.id)) break;
+      visited.add(cur.id);
+      chain.add(cur);
+      if (cur.parentId == null) break;
+      cur = byId[cur.parentId!];
+    }
+    for (final it in chain.reversed) {
+      final bt = it.baseTrack;
+      final tr = bt == null ? it.base : sampleTransform(bt, t, interpolate: interpolate);
+      acc = acc * composeMatrix(tr, it.pivot);
+    }
+    return acc;
+  }
+
+  static vm.Matrix4 _instanceParentWorld(List<Instance> instances, Instance inst, double t, bool interpolate) {
+    vm.Matrix4 acc = vm.Matrix4.identity();
+    final byId = {for (final x in instances) x.id: x};
+    // Build chain
+    final chain = <Instance>[];
+    Instance? cur = inst;
+    final visited = <String>{};
+    while (cur != null) {
+      if (visited.contains(cur.id)) break;
+      visited.add(cur.id);
+      chain.add(cur);
+      if (cur.parentId == null) break;
+      cur = byId[cur.parentId!];
+    }
+    // Multiply up to parent (exclude current instance)
+    for (int i = chain.length - 1; i >= 1; i--) {
+      final it = chain[i];
+      final bt = it.baseTrack;
+      final tr = bt == null ? it.base : sampleTransform(bt, t, interpolate: interpolate);
+      acc = acc * composeMatrix(tr, it.pivot);
+    }
+    return acc;
+  }
+
+  static Map<String, Transform2D> _poseOf(Instance inst, double t, {required bool interpolate}) {
+    final pose = <String, Transform2D>{};
+    for (final e in inst.boneTracks.entries) {
+      pose[e.key] = sampleTransform(e.value, t, interpolate: interpolate);
+    }
+    return pose;
+  }
+
+  static double _distPtSeg(Offset p, Offset a, Offset b) {
+    final ab = b - a;
+    final t = ((p - a).dx * ab.dx + (p - a).dy * ab.dy) / (ab.dx * ab.dx + ab.dy * ab.dy + 1e-6);
+    final u = t.clamp(0.0, 1.0);
+    final c = a + ab * u;
+    return (p - c).distance;
+  }
+}
+
+class _GizmoPainter extends CustomPainter {
+  final Sequence seq;
+  final Instance? inst;
+  final Model? model;
+  final double t;
+  final String tool;
+  final bool boneMode;
+  final String? selectedBoneId;
+  final String? activePoleBoneId;
+  final double viewportScale;
+  final Offset viewportOffset;
+  final List<Offset>? lassoPoints;
+  final Set<String>? lassoSelection;
+  final Offset? lassoCenterWorld;
+
+  _GizmoPainter({
+    required this.seq,
+    required this.inst,
+    required this.model,
+    required this.t,
+    required this.tool,
+    required this.boneMode,
+    required this.selectedBoneId,
+    required this.activePoleBoneId,
+    required this.viewportScale,
+    required this.viewportOffset,
+    this.lassoPoints,
+    this.lassoSelection,
+    this.lassoCenterWorld,
+  });
+
+  Offset _w2s(Offset w) => viewportOffset + Offset(w.dx * viewportScale, w.dy * viewportScale);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (inst == null || model == null) return;
+    if (!(boneMode || tool == 'ik')) return;
+
+    final i = inst!;
+    final m = model!;
+
+    // Precompute transforms
+    final bones = {for (final b in m.bones) b.id: b};
+    final pose = <String, Transform2D>{};
+    for (final e in i.boneTracks.entries) {
+      pose[e.key] = sampleTransform(e.value, t, interpolate: seq.setting.interpolate);
+    }
+    final cache = <String, vm.Matrix4>{};
+    final instWorld = _instanceWorld(seq.instances, i, t, seq.setting.interpolate);
+
+    // Draw bone axes and pivots with a stick-fighter style
+    for (final b in m.bones) {
+      final w = instWorld * SkeletonUtil.worldOf(b, pose, bones, cache);
+      final p0w = _tx(w, Offset(b.pivot.x, b.pivot.y));
+      final p0 = _w2s(p0w);
+
+      // Determine end
+      Offset p1;
+      final child = m.bones.firstWhere((x) => x.parentId == b.id, orElse: () => const Bone(id: '', parentId: null, pivot: Vec2(0,0), bind: Transform2D()));
+      if (child.id.isNotEmpty) {
+        final cw = instWorld * SkeletonUtil.worldOf(child, pose, bones, cache);
+        p1 = _w2s(_tx(cw, Offset(child.pivot.x, child.pivot.y)));
+      } else {
+        // Tip estimate from bind: +Y direction of this bone length 60 as default
+        final tipLocal = Offset(b.pivot.x, b.pivot.y + 60);
+        p1 = _w2s(_tx(w, tipLocal));
+      }
+
+      final sel = selectedBoneId == b.id;
+      final axis = Paint()
+        ..color = sel ? const ui.Color(0xFF1E88E5) : const ui.Color(0xFF222222)
+        ..strokeWidth = sel ? 6 : 4
+        ..strokeCap = StrokeCap.round;
+      canvas.drawLine(p0, p1, axis);
+
+      // Draw pivot node
+      final pivotFill = Paint()..color = sel ? const ui.Color(0xFF64B5F6) : const ui.Color(0xFF444444);
+      canvas.drawCircle(p0, sel ? 6 : 4, pivotFill);
+    }
+
+    // Draw pole-vector handle for IK if a bone is selected and has parent
+    if (tool == 'ik' && selectedBoneId != null) {
+      final bid = selectedBoneId!;
+      final b = bones[bid];
+      if (b != null && b.parentId != null) {
+        // Parent world matrix
+        final pw = instWorld * SkeletonUtil.worldOf(bones[b.parentId]!, pose, bones, cache);
+        final local = i.ikPoles[bid] ?? const Vec2(0, 0);
+        var center = _w2s(_tx(pw, local.o));
+
+        // If no pole set yet (0,0), put default in front of bending plane: from elbow position + normal
+        if (local.x == 0.0 && local.y == 0.0) {
+          // Default: place in front of parent->child direction normal
+          final parentPivot = _tx(pw, Offset(bones[b.parentId!]!.pivot.x, bones[b.parentId!]!.pivot.y));
+          // Child position
+          final bw = instWorld * SkeletonUtil.worldOf(b, pose, bones, cache);
+          final childPivot = _tx(bw, Offset(b.pivot.x, b.pivot.y));
+          final dir = (childPivot - parentPivot);
+          final n = Offset(-dir.dy, dir.dx);
+          final nn = n.distance < 1e-3 ? const Offset(0, -1) : n / n.distance;
+          center = childPivot + nn * 40.0;
+        }
+
+        // Draw guide from joint to pole
+        final childWorld = instWorld * SkeletonUtil.worldOf(b, pose, bones, cache);
+        final elbow = _w2s(_tx(childWorld, Offset(b.pivot.x, b.pivot.y)));
+        final guide = Paint()
+          ..color = const ui.Color(0x6632CD32)
+          ..strokeWidth = 2;
+        canvas.drawLine(elbow, center, guide);
+
+        // Handle size and emphasis
+        final emph = activePoleBoneId == bid;
+        final s = (emph ? 18.0 : 12.0);
+        final rect = Rect.fromCenter(center: center, width: s, height: s);
+        final fill = Paint()..color = emph ? const ui.Color(0xFF43A047) : const ui.Color(0xFF2E7D32);
+        final stroke = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = emph ? 3 : 2
+          ..color = const ui.Color(0xFFFFFFFF);
+        canvas.drawRect(rect, fill);
+        canvas.drawRect(rect, stroke);
+      }
+    }
+
+    // Draw end-effector handle for two-bone chain
+    if (tool == 'ik' && selectedBoneId != null) {
+      final sel = selectedBoneId!;
+      final chain = _findTwoBoneChainLocal(model!, sel);
+      if (chain != null) {
+        final lower = chain.item2;
+        final lw = instWorld * SkeletonUtil.worldOf(lower, pose, bones, cache);
+        // Prefer child's pivot as tip if exists
+        final child = model!.bones.firstWhere(
+          (x) => x.parentId == lower.id,
+          orElse: () => const Bone(id: '', parentId: null, pivot: Vec2(0,0), bind: Transform2D()),
+        );
+        Offset tip;
+        if (child.id.isNotEmpty) {
+          final cw = instWorld * SkeletonUtil.worldOf(child, pose, bones, cache);
+          tip = _w2s(_tx(cw, Offset(child.pivot.x, child.pivot.y)));
+        } else {
+          tip = _w2s(_tx(lw, Offset(0, _boneLengthLocal(model!, lower.id))));
+        }
+        const double jointRadius = 10.0;
+        final fill = Paint()..color = const ui.Color(0xFFFDD835); // amber
+        final stroke = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..color = const ui.Color(0xFF5D4037);
+        canvas.drawCircle(tip, jointRadius, fill);
+        canvas.drawCircle(tip, jointRadius, stroke);
+      }
+    }
+
+    // Lasso overlay (points and selection highlight)
+    if (tool == 'lasso') {
+      if (lassoPoints != null && lassoPoints!.length > 1) {
+        final path = Path()..moveTo(lassoPoints!.first.dx, lassoPoints!.first.dy);
+        for (final p in lassoPoints!.skip(1)) { path.lineTo(p.dx, p.dy); }
+        final pen = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..color = const ui.Color(0xFF42A5F5);
+        canvas.drawPath(path, pen);
+      }
+      if (lassoSelection != null && lassoSelection!.isNotEmpty) {
+        final selPaint = Paint()..color = const ui.Color(0xFF42A5F5).withOpacity(0.9);
+        for (final b in m.bones) {
+          if (!lassoSelection!.contains(b.id)) continue;
+          final w = instWorld * SkeletonUtil.worldOf(b, pose, bones, cache);
+          final p0w = _tx(w, Offset(b.pivot.x, b.pivot.y));
+          final p0 = _w2s(p0w);
+          canvas.drawCircle(p0, 5, selPaint);
+        }
+        if (lassoCenterWorld != null) {
+          final c = _w2s(lassoCenterWorld!);
+          // Draw rotate handle (top)
+          final rot = c + const Offset(0, -40);
+          final sc = c + const Offset(40, 0);
+          final hp = Paint()..color = const ui.Color(0xFF42A5F5);
+          final hs = Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2
+            ..color = const ui.Color(0xFF1565C0);
+          canvas.drawCircle(rot, 8, hp); canvas.drawCircle(rot, 8, hs);
+          canvas.drawCircle(sc, 8, hp); canvas.drawCircle(sc, 8, hs);
+          // Center mark
+          canvas.drawCircle(c, 3, hp);
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _GizmoPainter old) {
+    return old.inst != inst ||
+        old.model != model ||
+        old.t != t ||
+        old.tool != tool ||
+        old.boneMode != boneMode ||
+        old.selectedBoneId != selectedBoneId ||
+        old.activePoleBoneId != activePoleBoneId ||
+        old.viewportScale != viewportScale ||
+        old.viewportOffset != viewportOffset;
+  }
+
+  static vm.Matrix4 _instanceWorld(List<Instance> instances, Instance inst, double t, bool interpolate) {
+    vm.Matrix4 acc = vm.Matrix4.identity();
+    final byId = {for (final x in instances) x.id: x};
+    // Build chain from root to this
+    final chain = <Instance>[];
+    Instance? cur = inst;
+    final visited = <String>{};
+    while (cur != null) {
+      if (visited.contains(cur.id)) break;
+      visited.add(cur.id);
+      chain.add(cur);
+      if (cur.parentId == null) break;
+      cur = byId[cur.parentId!];
+    }
+    for (final it in chain.reversed) {
+      final bt = it.baseTrack;
+      final tr = bt == null ? it.base : sampleTransform(bt, t, interpolate: interpolate);
+      acc = acc * composeMatrix(tr, it.pivot);
+    }
+    return acc;
+  }
+
+  static Offset _tx(vm.Matrix4 m, Offset o) {
+    final v = m.transform3(vm.Vector3(o.dx, o.dy, 0));
+    return Offset(v.x, v.y);
+  }
+
+  // Helpers replicated for painter scope
+  _Pair? _findTwoBoneChainLocal(Model model, String chosenId) {
+    final byId = {for (final b in model.bones) b.id: b};
+    final initialLower = byId[chosenId];
+    if (initialLower == null) return null;
+
+    Bone upper;
+    Bone lower;
+
+    if (initialLower.parentId != null) {
+      final parent = byId[initialLower.parentId!];
+      if (parent == null) {
+        return null;
+      }
+      upper = parent;
+      lower = initialLower;
+    } else {
+      final children = model.bones.where((x) => x.parentId == chosenId).toList();
+      if (children.isEmpty) return null;
+      children.sort((a, b) => _boneLengthLocal(model, b.id).compareTo(_boneLengthLocal(model, a.id)));
+      upper = initialLower;
+      final child = byId[children.first.id];
+      if (child == null) return null;
+      lower = child;
+    }
+    return _Pair(upper, lower);
+  }
+
+  double _boneLengthLocal(Model model, String boneId) {
+    final child = model.bones.firstWhere(
+      (x) => x.parentId == boneId,
+      orElse: () => const Bone(id: '', parentId: null, pivot: Vec2(0,0), bind: Transform2D()),
+    );
+    if (child.id.isNotEmpty) {
+      final v = child.bind.pos;
+      final l = math.sqrt(v.x * v.x + v.y * v.y);
+      if (l > 1e-3) return l;
+    }
+    final att = model.attachments.firstWhere(
+      (a) => a.boneId == boneId && a.type == PrimType.line,
+      orElse: () => const Attachment(id: '', boneId: '', type: PrimType.line),
+    );
+    if (att.id.isNotEmpty) {
+      final b = att.b;
+      final l = math.sqrt(b.x * b.x + b.y * b.y);
+      if (l > 1e-3) return l;
+    }
+    return 60.0;
+  }
+}
+
+class _Pair {
+  final Bone item1;
+  final Bone item2;
+  const _Pair(this.item1, this.item2);
+}
+

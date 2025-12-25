@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout android:layout_width="fill_parent" android:layout_height="fill_parent"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <android.support.v7.widget.Toolbar android:theme="@style/ThemeOverlay.AppCompat.ActionBar" android:id="@id/picker_toolbar" android:background="?colorPrimary" android:layout_width="fill_parent" android:layout_height="wrap_content" android:minHeight="?actionBarSize" android:layout_alignParentTop="true">
+        <TextView android:textAppearance="@style/TextAppearance.AppCompat.Widget.ActionBar.Title" android:textColor="@android:color/white" android:ellipsize="start" android:id="@id/current_dir" android:layout_width="fill_parent" android:layout_height="wrap_content" android:singleLine="true" />
+    </android.support.v7.widget.Toolbar>
+    <android.support.v7.widget.RecyclerView android:id="@android:id/list" android:layout_width="fill_parent" android:layout_height="wrap_content" android:layout_above="@id/button_container" android:layout_below="@id/picker_toolbar" />
+    <LinearLayout android:orientation="horizontal" android:id="@id/button_container" android:layout_width="fill_parent" android:layout_height="wrap_content" android:layout_alignParentBottom="true">
+        <Button android:id="@id/button_cancel" android:layout_width="0.0dip" android:layout_height="48.0dip" android:text="@android:string/cancel" android:layout_weight="1.0" style="?android:attr/borderlessButtonStyle" />
+        <Button android:id="@id/button_ok" android:layout_width="0.0dip" android:layout_height="48.0dip" android:text="@android:string/ok" android:layout_weight="1.0" style="?android:attr/borderlessButtonStyle" />
+    </LinearLayout>
+</RelativeLayout>

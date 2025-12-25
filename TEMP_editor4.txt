@@ -1,0 +1,400 @@
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom).add(const EdgeInsets.all(16)),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('스틱 파이터 프로필', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 12),
+                  _numField('머리 반지름', headCtl),
+                  _numField('몸통 길이', torsoCtl),
+                  _numField('상완 길이', uaCtl),
+                  _numField('하완 길이', laCtl),
+                  _numField('허벅지 길이', thCtl),
+                  _numField('종아리 길이', shCtl),
+                  _numField('팔다리 선 두께', limbCtl),
+                  _numField('몸통 선 두께', torsoSCtl),
+                  const SizedBox(height: 8),
+                  Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+                    TextButton(onPressed: ()=> Navigator.pop(ctx), child: const Text('취소')),
+                    const SizedBox(width: 8),
+                    FilledButton(onPressed: () async {
+                      double p(TextEditingController c, double d){ final v=double.tryParse(c.text.trim()); return v==null||v.isNaN?d:v; }
+                      final prof = StickProfile(
+                        headRadius: p(headCtl, headR), torsoLen: p(torsoCtl, torso), upperArmLen: p(uaCtl, ua), lowerArmLen: p(laCtl, la),
+                        thighLen: p(thCtl, th), shinLen: p(shCtl, sh), strokeLimb: p(limbCtl, limb), strokeTorso: p(torsoSCtl, torsoS),
+                      );
+                      await repo.applyStickProfile(prof);
+                      if (!mounted) return;
+                      setState((){});
+                      Navigator.pop(ctx);
+                    }, child: const Text('적용')),
+                  ])
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _numField(String label, TextEditingController ctl) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4.0),
+      child: TextField(
+        controller: ctl,
+        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        decoration: InputDecoration(labelText: label),
+      ),
+    );
+  }
+
+  Future<void> _exportMp4() async {
+    final opts = await _promptExportOptions(context, defaultFormat: 'mp4');
+    if (opts == null) return;
+    setState(() => exporting = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final start = opts.useLoop && loopEnabled ? loopStart : 1;
+      final end = opts.useLoop && loopEnabled ? loopEnd : totalFrames;
+      final (tw,th) = _scaledResolution(seq.setting.width, seq.setting.height, opts.resPreset);
+      // Simple modal progress dialog with live updates via StatefulBuilder
+      double prog = 0.0;
+      String phase = 'Preparing...';
+      String etaText = '';
+      DateTime stageStart = DateTime.now();
+      final cancelToken = ExportCancelToken();
+      StateSetter? setDialogState;
+      // Show dialog (non-blocking)
+      // ignore: unawaited_futures
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) {
+          return WillPopScope(
+            onWillPop: () async => false,
+            child: StatefulBuilder(
+              builder: (ctx2, setState2) {
+                setDialogState = setState2;
+                return AlertDialog(
+                  title: const Text('Exporting MP4'),
+                  content: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(phase),
+                      const SizedBox(height: 6),
+                      if (etaText.isNotEmpty) Text('남은 시간: ' + etaText, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                      const SizedBox(height: 6),
+                      LinearProgressIndicator(value: prog <= 0.0 ? null : prog),
+                    ],
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () {
+                        cancelToken.cancel();
+                        setState2(() { phase = '취소 중...'; });
+                      },
+                      child: const Text('취소'),
+                    )
+                  ],
+                );
+              },
+            ),
+          );
+        },
+      );
+      void _updateDialog(String newPhase, double newProg){
+        if (setDialogState != null) {
+          setDialogState!.call(() {
+            if (phase != newPhase) {
+              stageStart = DateTime.now();
+            }
+            phase = newPhase;
+            prog = newProg;
+            etaText = _formatEta(stageStart, prog);
+          });
+        }
+      }
+
+      // Kick actual export
+      final res = await Exporter.exportSequenceToMp4(
+        seq: seq,
+        models: context.read<AppState>().repo.models,
+        images: context.read<AppState>().repo.images,
+        totalFrames: totalFrames,
+        startFrame: start,
+        endFrame: end,
+        overrideFps: opts.fps,
+        overrideWidth: tw,
+        overrideHeight: th,
+        onProgress: (cur, max){
+          final p = (max <= 0) ? 0.0 : (cur / max).clamp(0.0, 1.0);
+          _updateDialog('Rendering frames ($cur/$max)', p);
+        },
+        onEncodingProgress: (p){
+          _updateDialog('Encoding video', p);
+        },
+        cancelToken: cancelToken,
+      );
+      // Close progress dialog
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).maybePop();
+      }
+
+      if (Platform.isAndroid || Platform.isIOS) {
+        await _showExportActionsSheet(res.file);
+      } else {
+        final savePath = await FilePicker.platform.saveFile(
+          dialogTitle: 'Save Video (MP4)',
+          fileName: '${seq.name}.mp4',
+          type: FileType.custom,
+          allowedExtensions: const ['mp4'],
+        );
+        if (savePath != null) {
+          await File(res.file.path).copy(savePath);
+          messenger.showSnackBar(SnackBar(content: Text('Video exported: $savePath')));
+        } else {
+          messenger.showSnackBar(SnackBar(content: Text('Video ready: ${res.file.path}')));
+        }
+      }
+    } on ExportCancelled {
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).maybePop();
+      }
+      messenger.showSnackBar(const SnackBar(content: Text('MP4 내보내기가 취소되었습니다.')));
+    } catch (e) {
+      // Close progress dialog if showing
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).maybePop();
+      }
+      messenger.showSnackBar(SnackBar(content: Text('MP4 export failed: $e')));
+    } finally {
+      if (mounted) setState(() => exporting = false);
+    }
+  }
+
+  String _formatEta(DateTime stageStart, double progress) {
+    if (progress <= 0.0) return '';
+    final elapsed = DateTime.now().difference(stageStart).inMilliseconds;
+    if (elapsed <= 0) return '';
+    final totalMs = (elapsed / (progress <= 0 ? 1e-6 : progress)).clamp(0, 12 * 3600 * 1000).toInt();
+    final remainMs = (totalMs - elapsed).clamp(0, 12 * 3600 * 1000).toInt();
+    final secs = (remainMs / 1000).ceil();
+    final m = (secs ~/ 60).toString().padLeft(2, '0');
+    final s = (secs % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  Future<void> _showExportActionsSheet(File file) async {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    await showModalBottomSheet(
+      context: context,
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('갤러리에 저장'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  try {
+                    final res = await SaverGallery.saveFile(
+                      filePath: file.path,
+                      fileName: '${seq.name}.mp4',
+                      androidRelativePath: 'Movies/BOKU Animator',
+                      skipIfExists: false,
+                    );
+                    final ok = res.isSuccess == true;
+                    if (ok == true) {
+                      messenger.showSnackBar(const SnackBar(content: Text('갤러리에 저장되었습니다.')));
+                    } else {
+                      messenger.showSnackBar(SnackBar(content: Text('갤러리 저장 실패: $res')));
+                    }
+                  } catch (e) {
+                    messenger.showSnackBar(SnackBar(content: Text('갤러리 저장 실패: $e')));
+                  }
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.ios_share),
+                title: const Text('공유하기'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await Share.shareXFiles([
+                    XFile(file.path, mimeType: 'video/mp4', name: '${seq.name}.mp4'),
+                  ], text: '${seq.name}.mp4');
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.save_alt),
+                title: const Text('다른 이름으로 저장...'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  final savePath = await FilePicker.platform.saveFile(
+                    dialogTitle: 'Save Video (MP4)',
+                    fileName: '${seq.name}.mp4',
+                    type: FileType.custom,
+                    allowedExtensions: const ['mp4'],
+                  );
+                  if (savePath != null) {
+                    await File(file.path).copy(savePath);
+                    messenger.showSnackBar(SnackBar(content: Text('저장됨: $savePath')));
+                  }
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  (int,int) _scaledResolution(int w, int h, String preset) {
+    if (preset == 'Original') return (w,h);
+    final aspect = w / h;
+    int ph = switch(preset){
+      '1080p' => 1080,
+      '720p' => 720,
+      '480p' => 480,
+      _ => h,
+    };
+    final nh = ph;
+    final nw = (ph * aspect).round();
+    return (nw, nh);
+  }
+
+  Future<_ExportOpts?> _promptExportOptions(BuildContext context, {String defaultFormat = 'mp4'}) async {
+    String res = 'Original';
+    final fpsCtrl = TextEditingController(text: seq.setting.fps.toString());
+    bool useLoopRange = loopEnabled;
+    return await showDialog<_ExportOpts>(context: context, builder: (ctx){
+      return AlertDialog(
+        title: const Text('Export Options'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(children:[ const Text('Resolution'), const SizedBox(width: 12),
+              DropdownButton<String>(value: res, items: const [
+                DropdownMenuItem(value: 'Original', child: Text('Original')),
+                DropdownMenuItem(value: '1080p', child: Text('1080p')),
+                DropdownMenuItem(value: '720p', child: Text('720p')),
+                DropdownMenuItem(value: '480p', child: Text('480p')),
+              ], onChanged: (v){ res = v??res; }),
+            ]),
+            const SizedBox(height: 8),
+            TextField(controller: fpsCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'FPS')),
+            const SizedBox(height: 8),
+            if (loopEnabled)
+              StatefulBuilder(builder: (ctx2,setState2){
+                return CheckboxListTile(value: useLoopRange, onChanged: (b){ setState2(()=> useLoopRange = b??useLoopRange); }, title: Text('Export loop range ($loopStart-$loopEnd)'));
+              })
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: ()=> Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(onPressed: (){
+            final fps = int.tryParse(fpsCtrl.text.trim()) ?? seq.setting.fps;
+            Navigator.pop(ctx, _ExportOpts(resPreset: res, fps: fps, useLoop: useLoopRange));
+          }, child: const Text('Export')),
+        ],
+      );
+    });
+  }
+
+  // Mobile-friendly sheets for narrow layouts
+  void _openHierarchySheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final height = MediaQuery.of(ctx).size.height * 0.6;
+        return SizedBox(
+          height: height,
+          child: HierarchyPanel(
+            sequence: seq,
+            models: context.read<AppState>().repo.models,
+            selectedId: selectedId,
+            onSelect: (id) => setState(() => selectedId = id),
+            onInstancesChanged: (list) => _commitInstances(list, 'Hierarchy change'),
+          ),
+        );
+      },
+    );
+  }
+
+  void _openOnionSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final height = MediaQuery.of(ctx).size.height * 0.5;
+        return SizedBox(
+          height: height,
+          child: OnionPanel(
+            onion: seq.onion,
+            onChanged: (o) => setState(() {
+              seq = Sequence(
+                id: seq.id,
+                name: seq.name,
+                setting: seq.setting,
+                onion: o,
+                instances: seq.instances,
+                audio: seq.audio,
+              );
+            }),
+          ),
+        );
+      },
+    );
+  }
+
+  void _openAudioSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final height = MediaQuery.of(ctx).size.height * 0.6;
+        return SizedBox(
+          height: height,
+          child: AudioPanel(
+            tracks: seq.audio,
+            onChanged: (tracks){
+              setState(() {
+                seq = Sequence(
+                  id: seq.id,
+                  name: seq.name,
+                  setting: seq.setting,
+                  onion: seq.onion,
+                  instances: seq.instances,
+                  audio: tracks,
+                );
+              });
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  void _openStyleSheet() {
+    final id = selectedId; if (id == null) return;
+    final inst = seq.instances.firstWhere((x)=> x.id==id, orElse: ()=> const Instance(id:'', name:'', modelId:'', base: Transform2D()));
+    if (inst.id.isEmpty) return;
+    final ctrl = ValueNotifier<double>(inst.lineWidthScale);
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) {
+        return SafeArea(

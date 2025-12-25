@@ -1,0 +1,59 @@
+name: bokuanimator
+description: Desktop preview scaffolding for the animation editor
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  provider: ^6.0.5
+  uuid: ^4.4.0
+  file_picker: ^8.0.3
+  vector_math: ^2.1.4
+  path: ^1.9.0
+  path_provider: ^2.1.2
+  archive: ^3.4.10
+  share_plus: ^10.0.2
+  saver_gallery: ^4.0.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+  flutter_launcher_icons: ^0.13.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/models/stickman.json
+    - assets/icon/BOKUAME.png
+    - assets/l10n/en.json
+    - assets/l10n/ko.json
+    - assets/l10n/es.json
+    - assets/l10n/de.json
+    - assets/l10n/fr.json
+    - assets/l10n/ja.json
+    - assets/l10n/zh.json
+    - assets/l10n/ru.json
+
+flutter_launcher_icons:
+  image_path: assets/icon/BOKUAME.png
+  android: true
+  ios: true
+  web:
+    generate: true
+    image_path: assets/icon/BOKUAME.png
+    background_color: "#ffffff"
+    theme_color: "#2196f3"
+  windows:
+    generate: true
+    image_path: assets/icon/BOKUAME.png
+    icon_size: 256
+  macos:
+    generate: false
+

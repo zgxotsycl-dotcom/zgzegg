@@ -1,0 +1,220 @@
+
+  static bool _isStickFigure(Model m) {
+    final need = <String>{
+      'torso','head',
+      'l_upper_arm','l_lower_arm','r_upper_arm','r_lower_arm',
+      'l_thigh','l_shin','r_thigh','r_shin'
+    };
+    final ids = { for (final b in m.bones) b.id };
+    return need.difference(ids).isEmpty;
+  }
+
+  static void _paintStickman(ui.Canvas canvas, Instance inst, Model model, double t, Sequence seq, bool interpolate, {ui.Color? tint, List<Instance>? instances, bool showHelperJoints = true, ui.Color? bgForContrast, double? bgCenterLuma}) {
+    final byId = {for (final b in model.bones) b.id: b};
+    final pose = <String, Transform2D>{};
+    // For stickman, allow anchor-based offsets but keep rotation-only kinematics otherwise.
+    for (final b in model.bones) {
+      final trSrc = inst.boneTracks[b.id];
+      final tr = trSrc == null ? const Transform2D() : sampleTransform(trSrc, t, interpolate: interpolate);
+      final anchor = _sampleAnchorStep(inst.anchorTracks[b.id], t);
+      pose[b.id] = Transform2D(pos: anchor ?? const Vec2(0,0), rotDeg: tr.rotDeg, scale: const Vec2(1,1));
+    }
+    final cache = <String, vm.Matrix4>{};
+    final instWorld = _instanceWorld(inst, {for (final x in (instances ?? const <Instance>[])) x.id: x}, t, interpolate);
+
+    ui.Offset _wp(String id) {
+      final b = byId[id]!;
+      final m = instWorld * SkeletonUtil.worldOf(b, pose, byId, cache);
+      return _tx(m, const ui.Offset(0,0));
+    }
+    ui.Offset _end(String id, double len) {
+      final b = byId[id]!;
+      final m = instWorld * SkeletonUtil.worldOf(b, pose, byId, cache);
+      return _tx(m, ui.Offset(0, len));
+    }
+    double _len(String attId, double def){
+      final a = model.attachments.where((x)=>x.id==attId);
+      return a.isEmpty?def:a.first.b.y.abs();
+    }
+    final headR = (){ final a = model.attachments.where((x)=>x.id=='head_circle'); return a.isEmpty?20.0:a.first.b.x.abs(); }();
+    final laLen = _len('l_lower_arm_line', 60);
+    final shLen = _len('l_shin_line', 70);
+
+    final baseStroke = tint ?? const ui.Color(0xFF000000);
+    final effBg = bgForContrast ?? seq.setting.backgroundColor;
+    final minC = _tunedMinContrast(seq.setting.minStrokeContrast, bgCenterLuma);
+    final limbColor = seq.setting.autoStrokeContrast
+        ? _ensureContrast(baseStroke, effBg, minRatio: minC)
+        : baseStroke;
+    final limb = ui.Paint()
+      ..style = ui.PaintingStyle.stroke
+      ..strokeWidth = 4 * inst.lineWidthScale
+      ..strokeCap = ui.StrokeCap.round
+      ..strokeJoin = ui.StrokeJoin.round
+      ..color = limbColor;
+    final torsoP = ui.Paint()
+      ..style = ui.PaintingStyle.stroke
+      ..strokeWidth = 5 * inst.lineWidthScale
+      ..strokeCap = ui.StrokeCap.round
+      ..strokeJoin = ui.StrokeJoin.round
+      ..color = limbColor;
+    final joint = ui.Paint()..style=ui.PaintingStyle.fill..color=limbColor;
+
+    // torso: from hip (torso pivot) to neck (head pivot)
+    final torsoBase = _wp('torso');
+    final headPivot = _wp('head');
+    canvas.drawLine(torsoBase, headPivot, torsoP);
+    // head circle (use offset -20 in head local)
+    final headM = instWorld * SkeletonUtil.worldOf(byId['head']!, pose, byId, cache);
+    final headCenter = _tx(headM, const ui.Offset(0,-20));
+    canvas.drawCircle(headCenter, headR, ui.Paint()..style=ui.PaintingStyle.stroke..strokeWidth=4*inst.lineWidthScale..color=(tint??const ui.Color(0xFF000000)));
+
+    void arm(String upper, String lower){
+      final p0 = _wp(upper);
+      final p1 = _wp(lower);
+      final p2 = _end(lower, laLen);
+      canvas.drawLine(p0, p1, limb);
+      canvas.drawLine(p1, p2, limb);
+      if (showHelperJoints){ canvas.drawCircle(p0, 4, joint); canvas.drawCircle(p1, 4, joint); canvas.drawCircle(p2, 3, joint); }
+    }
+    void leg(String thigh, String shin){
+      final p0 = _wp(thigh);
+      final p1 = _wp(shin);
+      final p2 = _end(shin, shLen);
+      canvas.drawLine(p0, p1, limb);
+      canvas.drawLine(p1, p2, limb);
+      if (showHelperJoints){ canvas.drawCircle(p0, 4, joint); canvas.drawCircle(p1, 4, joint); canvas.drawCircle(p2, 3, joint); }
+    }
+    arm('l_upper_arm','l_lower_arm');
+    arm('r_upper_arm','r_lower_arm');
+    leg('l_thigh','l_shin');
+    leg('r_thigh','r_shin');
+  }
+
+  static vm.Matrix4 _instanceWorld(Instance inst, Map<String, Instance> byId, double t, bool interpolate) {
+    vm.Matrix4 acc = vm.Matrix4.identity();
+    // Build chain from root to this
+    final chain = <Instance>[];
+    Instance? cur = inst;
+    final visited = <String>{};
+    while (cur != null) {
+      if (visited.contains(cur.id)) break;
+      visited.add(cur.id);
+      chain.add(cur);
+      if (cur.parentId == null) break;
+      cur = byId[cur.parentId!];
+    }
+    for (final it in chain.reversed) {
+      final bt = it.baseTrack;
+      final tr = bt == null ? it.base : sampleTransform(bt, t, interpolate: interpolate);
+      acc = acc * composeMatrix(tr, it.pivot);
+    }
+    return acc;
+  }
+
+  static void _drawImage(ui.Canvas canvas, vm.Matrix4 mat, Attachment a, AttTrack? tr, double t, Map<String, ui.Image> images, {ui.Color? tint}) {
+    String? pth = a.imagePath;
+    if (a.spriteFrames != null && a.spriteFrames!.isNotEmpty) {
+      int idx;
+      if (tr != null && tr.frameIndex.isNotEmpty) {
+        final v = sampleScalarD(tr.frameIndex, t);
+        idx = v.round().clamp(0, a.spriteFrames!.length - 1);
+      } else {
+        final ti = t.floor();
+        final len = a.spriteFrames!.length;
+        // 1-based timeline: frame 1 -> sprite index 0
+        idx = ((ti - 1) % len + len) % len;
+      }
+      pth = a.spriteFrames![idx];
+    }
+    if (pth == null) return;
+    final img = images[pth];
+    if (img == null) return;
+
+    final sc = tr == null || tr.scale.isEmpty ? const Vec2(1, 1) : sampleVec2D(tr.scale, t);
+    final op = tr == null || tr.opacity.isEmpty ? 1.0 : sampleScalarD(tr.opacity, t).clamp(0.0, 1.0);
+    final tintKey = tr == null || tr.tint.isEmpty ? const ui.Color(0xFFFFFFFF) : sampleColorI(tr.tint, t);
+    final tintColor = tint ?? tintKey;
+
+    final m = mat.storage;
+    final tmat = Float64List.fromList([
+      m[0], m[1], 0, m[3],
+      m[4], m[5], 0, m[7],
+      0, 0, 1, 0,
+      m[12], m[13], 0, 1,
+    ]);
+    canvas.save();
+    canvas.transform(tmat);
+
+    final w = a.b.x * sc.x;
+    final h = a.b.y * sc.y;
+    final cx = a.a.x + a.b.x / 2;
+    final cy = a.a.y + a.b.y / 2;
+    final dst = ui.Rect.fromLTRB(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2);
+    final src = ui.Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble());
+
+    final p = ui.Paint()
+      ..filterQuality = ui.FilterQuality.high
+      ..color = ui.Color.fromARGB((op * 255).round(), 255, 255, 255)
+      ..colorFilter = ui.ColorFilter.mode(tintColor, ui.BlendMode.modulate);
+    canvas.drawImageRect(img, src, dst, p);
+    canvas.restore();
+  }
+
+  static ui.Offset _tx(vm.Matrix4 m, ui.Offset o) {
+    final v = m.transform3(vm.Vector3(o.dx, o.dy, 0));
+    return ui.Offset(v.x, v.y);
+  }
+
+  static Float64List _mat2d(vm.Matrix4 mat) => Float64List.fromList([
+        mat.entry(0, 0), mat.entry(0, 1), 0, mat.entry(0, 3),
+        mat.entry(1, 0), mat.entry(1, 1), 0, mat.entry(1, 3),
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+      ]);
+
+  static double _onionAlpha(double falloff, int k) {
+    final f = falloff.clamp(0.0, 1.0);
+    return (1.0 * List<double>.generate(k, (_) => f).fold(1.0, (p, e) => p * e)).clamp(0.05, 1.0);
+  }
+
+  static ui.Color _applyTintColor(ui.Color base, ui.Color? tint) {
+    if (tint == null) return base;
+    // Multiply blend approximation in sRGB
+    int mult(int a, int b) => ((a * b) / 255).round().clamp(0, 255);
+    return ui.Color.fromARGB(
+      base.alpha,
+      mult(base.red, tint.red),
+      mult(base.green, tint.green),
+      mult(base.blue, tint.blue),
+    );
+  }
+
+  static ui.Color _ensureContrast(ui.Color c, ui.Color bg, {double minRatio = 3.0}) {
+    double luma(ui.Color x) => (0.2126 * x.red + 0.7152 * x.green + 0.0722 * x.blue) / 255.0;
+    double ratio(ui.Color a, ui.Color b) {
+      final la = luma(a) + 0.05, lb = luma(b) + 0.05;
+      return la > lb ? la / lb : lb / la;
+    }
+    final r = ratio(c, bg);
+    if (r >= minRatio) return c;
+    final black = ui.Color.fromARGB(c.alpha, 0, 0, 0);
+    final white = ui.Color.fromARGB(c.alpha, 255, 255, 255);
+    return ratio(black, bg) >= ratio(white, bg) ? black : white;
+  }
+
+  // Step-sample Vec2: returns last key <= t or null if none
+  static Vec2? _sampleAnchorStep(List<KeyF<Vec2>>? keys, double t) {
+    if (keys == null || keys.isEmpty) return null;
+    final sorted = List<KeyF<Vec2>>.from(keys)..sort((a,b)=> a.t.compareTo(b.t));
+    if (t <= sorted.first.t) return sorted.first.v;
+    if (t >= sorted.last.t) return sorted.last.v;
+    for (int i = sorted.length - 1; i >= 0; i--) {
+      if (t >= sorted[i].t) return sorted[i].v;
+    }
+    return sorted.first.v;
+  }
+
+  static double _tunedMinContrast(double userMin, double? bgCenterLuma) {
+    // Boost contrast demand on mid-gray backgrounds; leave extremes closer to userMin
+    if (bgCenterLuma == null) return userMin.clamp(2.0, 7.0);

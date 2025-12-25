@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout android:gravity="center_horizontal" android:orientation="vertical" android:padding="8.0dip" android:layout_width="@dimen/modify_figure_dialog_width" android:layout_height="fill_parent"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <View android:layout_width="1.0dip" android:layout_height="0.0dip" android:layout_weight="1.0" />
+    <ImageView android:id="@id/increaseButton" android:layout_width="32.0dip" android:layout_height="32.0dip" android:src="@drawable/ic_action_add_black48dp" android:scaleType="centerInside" android:tint="#ff727272" android:contentDescription="@string/content_description_increase_size" />
+    <RelativeLayout android:layout_width="fill_parent" android:layout_height="wrap_content">
+        <EditText android:textSize="36.0sp" android:textColor="#ff454545" android:gravity="center" android:id="@id/scaleFactorEditText" android:paddingLeft="16.0dip" android:paddingRight="16.0dip" android:layout_width="wrap_content" android:layout_height="wrap_content" android:minWidth="48.0dip" android:maxLength="3" android:layout_centerInParent="true" android:inputType="number" />
+        <TextView android:textSize="32.0sp" android:textColor="@color/text_secondary" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/percent_mark" android:layout_toRightOf="@id/scaleFactorEditText" android:layout_alignBaseline="@id/scaleFactorEditText" />
+    </RelativeLayout>
+    <ImageView android:id="@id/decreaseButton" android:layout_width="32.0dip" android:layout_height="32.0dip" android:layout_marginTop="14.0dip" android:src="@drawable/ic_action_remove_black48dp" android:scaleType="centerInside" android:tint="#ff727272" />
+    <View android:layout_width="1.0dip" android:layout_height="0.0dip" android:layout_weight="1.0" android:contentDescription="@string/content_description_decrease_size" />
+</LinearLayout>

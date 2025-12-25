@@ -1,0 +1,48 @@
+{
+  "id": "stickman",
+  "name": "Stick Fighter",
+  "bones": [
+    {"id": "root", "parentId": null, "pivot": {"x": 0, "y": 0}, "bind": {"pos": {"x": 0, "y": 0}, "rotDeg": 0, "scale": {"x": 1, "y": 1}}},
+    {"id": "torso", "parentId": "root", "pivot": {"x": 0, "y": 0}, "bind": {"pos": {"x": 0, "y": 0}, "rotDeg": 0, "scale": {"x": 1, "y": 1}}},
+    {"id": "head", "parentId": "torso", "pivot": {"x": 0, "y": 0}, "bind": {"pos": {"x": 0, "y": -100}, "rotDeg": 0, "scale": {"x": 1, "y": 1}}},
+
+    {"id": "l_upper_arm", "parentId": "torso", "pivot": {"x": 0, "y": 0}, "bind": {"pos": {"x": -40, "y": -80}, "rotDeg": 0, "scale": {"x": 1, "y": 1}}},
+    {"id": "l_lower_arm", "parentId": "l_upper_arm", "pivot": {"x": 0, "y": 0}, "bind": {"pos": {"x": 0, "y": 60}, "rotDeg": 0, "scale": {"x": 1, "y": 1}}},
+    {"id": "r_upper_arm", "parentId": "torso", "pivot": {"x": 0, "y": 0}, "bind": {"pos": {"x": 40, "y": -80}, "rotDeg": 0, "scale": {"x": 1, "y": 1}}},
+    {"id": "r_lower_arm", "parentId": "r_upper_arm", "pivot": {"x": 0, "y": 0}, "bind": {"pos": {"x": 0, "y": 60}, "rotDeg": 0, "scale": {"x": 1, "y": 1}}},
+
+    {"id": "l_thigh", "parentId": "torso", "pivot": {"x": 0, "y": 0}, "bind": {"pos": {"x": 0, "y": 0}, "rotDeg": 25, "scale": {"x": 1, "y": 1}}},
+    {"id": "l_shin", "parentId": "l_thigh", "pivot": {"x": 0, "y": 0}, "bind": {"pos": {"x": 0, "y": 70}, "rotDeg": 0, "scale": {"x": 1, "y": 1}}},
+    {"id": "r_thigh", "parentId": "torso", "pivot": {"x": 0, "y": 0}, "bind": {"pos": {"x": 0, "y": 0}, "rotDeg": -25, "scale": {"x": 1, "y": 1}}},
+    {"id": "r_shin", "parentId": "r_thigh", "pivot": {"x": 0, "y": 0}, "bind": {"pos": {"x": 0, "y": 70}, "rotDeg": 0, "scale": {"x": 1, "y": 1}}}
+  ],
+  "attachments": [
+    {"id": "torso_line", "boneId": "torso", "type": "line", "a": {"x": 0, "y": 0}, "b": {"x": 0, "y": -100}, "strokeWidth": 5, "stroke": 4278190080, "fill": 0},
+    {"id": "head_circle", "boneId": "head", "type": "circle", "a": {"x": 0, "y": -20}, "b": {"x": 20, "y": 0}, "strokeWidth": 4, "stroke": 4278190080, "fill": 0},
+    {"id": "clavicle_l", "boneId": "torso", "type": "line", "a": {"x": 0, "y": -95}, "b": {"x": -40, "y": -80}, "strokeWidth": 4, "stroke": 4278190080, "fill": 0},
+    {"id": "clavicle_r", "boneId": "torso", "type": "line", "a": {"x": 0, "y": -95}, "b": {"x": 40, "y": -80}, "strokeWidth": 4, "stroke": 4278190080, "fill": 0},
+
+    {"id": "l_upper_arm_line", "boneId": "l_upper_arm", "type": "line", "a": {"x": 0, "y": 0}, "b": {"x": 0, "y": 60}, "strokeWidth": 4, "stroke": 4278190080, "fill": 0},
+    {"id": "l_shoulder_circle", "boneId": "l_upper_arm", "type": "circle", "a": {"x": 0, "y": 0}, "b": {"x": 4, "y": 0}, "strokeWidth": 0, "stroke": 0, "fill": 4278190080},
+    {"id": "l_lower_arm_line", "boneId": "l_lower_arm", "type": "line", "a": {"x": 0, "y": 0}, "b": {"x": 0, "y": 60}, "strokeWidth": 4, "stroke": 4278190080, "fill": 0},
+    {"id": "l_elbow_circle", "boneId": "l_lower_arm", "type": "circle", "a": {"x": 0, "y": 0}, "b": {"x": 4, "y": 0}, "strokeWidth": 0, "stroke": 0, "fill": 4278190080},
+    {"id": "l_wrist_circle", "boneId": "l_lower_arm", "type": "circle", "a": {"x": 0, "y": 60}, "b": {"x": 3, "y": 0}, "strokeWidth": 0, "stroke": 0, "fill": 4278190080},
+    {"id": "r_upper_arm_line", "boneId": "r_upper_arm", "type": "line", "a": {"x": 0, "y": 0}, "b": {"x": 0, "y": 60}, "strokeWidth": 4, "stroke": 4278190080, "fill": 0},
+    {"id": "r_shoulder_circle", "boneId": "r_upper_arm", "type": "circle", "a": {"x": 0, "y": 0}, "b": {"x": 4, "y": 0}, "strokeWidth": 0, "stroke": 0, "fill": 4278190080},
+    {"id": "r_lower_arm_line", "boneId": "r_lower_arm", "type": "line", "a": {"x": 0, "y": 0}, "b": {"x": 0, "y": 60}, "strokeWidth": 4, "stroke": 4278190080, "fill": 0},
+    {"id": "r_elbow_circle", "boneId": "r_lower_arm", "type": "circle", "a": {"x": 0, "y": 0}, "b": {"x": 4, "y": 0}, "strokeWidth": 0, "stroke": 0, "fill": 4278190080},
+    {"id": "r_wrist_circle", "boneId": "r_lower_arm", "type": "circle", "a": {"x": 0, "y": 60}, "b": {"x": 3, "y": 0}, "strokeWidth": 0, "stroke": 0, "fill": 4278190080},
+
+    {"id": "l_thigh_line", "boneId": "l_thigh", "type": "line", "a": {"x": 0, "y": 0}, "b": {"x": 0, "y": 70}, "strokeWidth": 4, "stroke": 4278190080, "fill": 0},
+    {"id": "l_hip_circle", "boneId": "l_thigh", "type": "circle", "a": {"x": 0, "y": 0}, "b": {"x": 4, "y": 0}, "strokeWidth": 0, "stroke": 0, "fill": 4278190080},
+    {"id": "l_shin_line", "boneId": "l_shin", "type": "line", "a": {"x": 0, "y": 0}, "b": {"x": 0, "y": 70}, "strokeWidth": 4, "stroke": 4278190080, "fill": 0},
+    {"id": "l_knee_circle", "boneId": "l_shin", "type": "circle", "a": {"x": 0, "y": 0}, "b": {"x": 4, "y": 0}, "strokeWidth": 0, "stroke": 0, "fill": 4278190080},
+    {"id": "l_ankle_circle", "boneId": "l_shin", "type": "circle", "a": {"x": 0, "y": 70}, "b": {"x": 3, "y": 0}, "strokeWidth": 0, "stroke": 0, "fill": 4278190080},
+
+    {"id": "r_thigh_line", "boneId": "r_thigh", "type": "line", "a": {"x": 0, "y": 0}, "b": {"x": 0, "y": 70}, "strokeWidth": 4, "stroke": 4278190080, "fill": 0},
+    {"id": "r_hip_circle", "boneId": "r_thigh", "type": "circle", "a": {"x": 0, "y": 0}, "b": {"x": 4, "y": 0}, "strokeWidth": 0, "stroke": 0, "fill": 4278190080},
+    {"id": "r_shin_line", "boneId": "r_shin", "type": "line", "a": {"x": 0, "y": 0}, "b": {"x": 0, "y": 70}, "strokeWidth": 4, "stroke": 4278190080, "fill": 0},
+    {"id": "r_knee_circle", "boneId": "r_shin", "type": "circle", "a": {"x": 0, "y": 0}, "b": {"x": 4, "y": 0}, "strokeWidth": 0, "stroke": 0, "fill": 4278190080},
+    {"id": "r_ankle_circle", "boneId": "r_shin", "type": "circle", "a": {"x": 0, "y": 70}, "b": {"x": 3, "y": 0}, "strokeWidth": 0, "stroke": 0, "fill": 4278190080}
+  ]
+}

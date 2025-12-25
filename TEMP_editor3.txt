@@ -1,0 +1,312 @@
+        Column(
+          children: [
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: Center(
+                  child: Stack(children: [
+                    StageViewport(
+                      seq: seq,
+                      models: context.read<AppState>().repo.models,
+                      images: context.read<AppState>().repo.images,
+                      t: curT,
+                      selectedId: selectedId,
+                      boneMode: boneMode,
+                      selectedBoneId: selectedBoneId,
+                      tool: _tool,
+                      // follow sequence interpolate preference for preview
+                      autoKey: autoKey,
+                      angleSnap: angleSnap,
+                      stickMode: stickMode,
+                      onQuickToolSelect: (name){ setState(()=> _tool = name); },
+                      onSelect: (id){ setState(()=> selectedId = id); },
+                      onSelectBone: (bid){ setState(()=> selectedBoneId = bid); },
+                      onChange: (updated) {
+                        final list = seq.instances.map((x) => x.id == updated.id ? updated : x).toList();
+                        if (_coalescing) {
+                          setState(()=> seq = seq.copyWith(instances: list));
+                        } else {
+                          _commitInstances(list, 'Gizmo $_tool');
+                        }
+                      },
+                      onInteractionStart: () {
+                        if (!_coalescing) {
+                          _coalescing = true;
+                          _seqBefore = seq;
+                        }
+                      },
+                      onInteractionEnd: (label) {
+                        if (_coalescing) {
+                          final before = _seqBefore!;
+                          final after = seq;
+                          _undo.push(UndoEntry(label, () { setState(()=> seq = before); }, () { setState(()=> seq = after); }));
+                          _coalescing = false;
+                          _seqBefore = null;
+                        }
+                      },
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+            if (showTimeline)
+              SimpleTimeline(
+                totalFrames: totalFrames,
+                current: curT,
+                onScrub: (v) => setState(() => curT = snapToFrames ? v.roundToDouble() : v),
+                oneBased: true,
+                playing: playing,
+                onPlayChanged: (b) {
+                  setState(() => playing = b);
+                  if (b) { _lastTick = Duration.zero; _ticker?.start(); } else { _ticker?.stop(); }
+                },
+                fps: seq.setting.fps,
+                playbackRate: seq.setting.playbackRate,
+                loopStart: loopEnabled ? loopStart : null,
+                loopEnd: loopEnabled ? loopEnd : null,
+                onLoopChanged: (rng) => setState(() {
+                  loopEnabled = true;
+                  loopStart = rng.start.round();
+                  loopEnd = rng.end.round();
+                }),
+                showLoopSlider: loopEnabled,
+                markers: _baseMarkers(),
+                onKeyAdd: (f) => _tlAddKeyEx(f),
+                onKeyDelete: (f) => _tlDeleteKeyEx(f),
+                onKeyMove: (a,b) => _tlMoveKeyEx(a,b),
+              ),
+          ],
+        ),
+        if (showHierarchy)
+          DockPanel(
+            id: 'hierarchy',
+            title: 'Hierarchy',
+            initialRect: const Rect.fromLTWH(12, 80, 340, 320),
+            child: HierarchyPanel(
+              sequence: seq,
+              models: context.read<AppState>().repo.models,
+              selectedId: selectedId,
+              onSelect: (id) => setState(()=> selectedId = id),
+              onInstancesChanged: (list) => _commitInstances(list, 'Hierarchy change'),
+            ),
+          ),
+        if (showOnion)
+          DockPanel(
+            id: 'onion',
+            title: 'Onion Skin',
+            initialRect: const Rect.fromLTWH(364, 80, 320, 200),
+            child: OnionPanel(
+              onion: seq.onion,
+              onChanged: (o) => setState(() {
+                seq = Sequence(
+                  id: seq.id,
+                  name: seq.name,
+                  setting: seq.setting,
+                  onion: o,
+                  instances: seq.instances,
+                  audio: seq.audio,
+                );
+              }),
+            ),
+          ),
+        if (_shouldShowEndCaps())
+          DockPanel(
+            id: 'endcaps',
+            title: 'End Caps',
+            initialRect: const Rect.fromLTWH(12, 410, 340, 260),
+            child: _endCapsPanel(),
+          ),
+          // Floating tools moved to OverlayEntry for performance
+      ]),
+      floatingActionButton: isPortrait
+          ? FloatingActionButton(
+              onPressed: () => setState(() => showTimeline = !showTimeline),
+              tooltip: showTimeline ? 'Hide Timeline' : 'Show Timeline',
+              child: Icon(showTimeline ? Icons.timeline : Icons.timeline_outlined),
+            )
+          : null,
+    );
+  }
+
+  bool _shouldShowEndCaps() {
+    final id = selectedId; if (id == null) return false;
+    final inst = seq.instances.firstWhere((x)=> x.id==id, orElse: ()=> const Instance(id:'', name:'', modelId:'', base: Transform2D()));
+    if (inst.id.isEmpty) return false;
+    final model = context.read<AppState>().repo.models[inst.modelId];
+    if (model == null) return false;
+    bool has(String aid) => model.attachments.any((a)=> a.id==aid);
+    // Only show if wrist/ankle circle attachments exist in the model
+    return has('l_wrist_circle') || has('r_wrist_circle') || has('l_ankle_circle') || has('r_ankle_circle');
+  }
+
+  Widget _endCapsPanel() {
+    final id = selectedId; if (id == null) return const SizedBox.shrink();
+    final inst = seq.instances.firstWhere((x)=> x.id==id);
+    final model = context.read<AppState>().repo.models[inst.modelId];
+    if (model == null) return const SizedBox.shrink();
+
+    Offset _curOff(String attId) {
+      final tr = inst.attachmentTracks[attId];
+      if (tr == null || tr.offset.isEmpty) return const Offset(0,0);
+      final v = tr.offset.first.v; // use frame 1 if present
+      return Offset(v.x, v.y);
+    }
+    double _curRadius(String attId) {
+      final a = model.attachments.firstWhere((e)=> e.id==attId, orElse: ()=> const Attachment(id:'', boneId:'', type: PrimType.circle));
+      if (a.id.isEmpty) return 5.0;
+      final base = a.b.x.abs();
+      final tr = inst.attachmentTracks[attId];
+      final sc = (tr==null || tr.scale.isEmpty) ? 1.0 : tr.scale.first.v.x;
+      return (base * sc).abs();
+    }
+
+    Future<void> _edit(String attId, String label) async {
+      final r0 = _curRadius(attId);
+      final o0 = _curOff(attId);
+      final rc = TextEditingController(text: r0.toStringAsFixed(2));
+      final xc = TextEditingController(text: o0.dx.toStringAsFixed(2));
+      final yc = TextEditingController(text: o0.dy.toStringAsFixed(2));
+      final ok = await showDialog<bool>(context: context, builder: (ctx){
+        return AlertDialog(
+          title: Text(label),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(controller: rc, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Radius (px)')),
+            Row(children:[
+              Expanded(child: TextField(controller: xc, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Offset X'))),
+              const SizedBox(width: 8),
+              Expanded(child: TextField(controller: yc, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Offset Y'))),
+            ])
+          ]),
+          actions: [
+            TextButton(onPressed: ()=> Navigator.pop(ctx,false), child: const Text('Cancel')),
+            FilledButton(onPressed: ()=> Navigator.pop(ctx,true), child: const Text('Apply')),
+          ],
+        );
+      });
+      if (ok != true) return;
+      final rv = double.tryParse(rc.text.trim()) ?? r0;
+      final xv = double.tryParse(xc.text.trim()) ?? o0.dx;
+      final yv = double.tryParse(yc.text.trim()) ?? o0.dy;
+      // Apply to selected
+      _applyEndCap(inst, model, attId, rv, Offset(xv, yv));
+      // Optionally mirror to counterpart with X flipped
+      if (_linkLR) {
+        final cp = _counterpartId(attId);
+        if (cp != null) {
+          _applyEndCap(inst, model, cp, rv, Offset(-xv, yv));
+        }
+      }
+    }
+
+    return ListView(
+      children: [
+        SwitchListTile(
+          title: const Text('Apply Left/Right Together'),
+          value: _linkLR,
+          onChanged: (v) => setState(()=> _linkLR = v),
+        ),
+        if (_linkLR)
+          SwitchListTile(
+            title: const Text('Mirror X on Counterpart'),
+            value: _mirrorXForLR,
+            onChanged: (v)=> setState(()=> _mirrorXForLR = v),
+          ),
+        const Divider(),
+        _capControls('l_wrist_circle', 'Left Wrist'),
+        _capControls('r_wrist_circle', 'Right Wrist'),
+        const Divider(),
+        _capControls('l_ankle_circle', 'Left Ankle'),
+        _capControls('r_ankle_circle', 'Right Ankle'),
+      ],
+    );
+  }
+
+  Widget _capControls(String attId, String label) {
+    final id = selectedId; if (id == null) return const SizedBox.shrink();
+    final inst = seq.instances.firstWhere((x)=> x.id==id);
+    final model = context.read<AppState>().repo.models[inst.modelId];
+    if (model == null) return const SizedBox.shrink();
+    Attachment? findAtt() => model.attachments.firstWhere((e)=> e.id==attId, orElse: ()=> const Attachment(id:'', boneId:'', type: PrimType.circle));
+    double baseRad() { final a = findAtt(); if (a==null || a.id.isEmpty) return 5.0; return a.b.x.abs(); }
+    double curRad() {
+      final base = baseRad();
+      final tr = inst.attachmentTracks[attId];
+      final sc = (tr==null || tr.scale.isEmpty) ? 1.0 : tr.scale.first.v.x;
+      return (base * sc).abs();
+    }
+    Offset curOff() {
+      final tr = inst.attachmentTracks[attId];
+      if (tr == null || tr.offset.isEmpty) return const Offset(0,0);
+      final v = tr.offset.first.v; return Offset(v.x, v.y);
+    }
+    final r0 = curRad();
+    final o0 = curOff();
+    final double rMax = (r0 * 3).clamp(20.0, 120.0);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 6.0),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('$label  R=${r0.toStringAsFixed(1)}  Off=(${o0.dx.toStringAsFixed(1)}, ${o0.dy.toStringAsFixed(1)})'),
+        // Radius slider
+        Row(children:[
+          const SizedBox(width: 8), const Text('R'), Expanded(
+            child: Slider(
+              value: r0.clamp(0.0, rMax), min: 0, max: rMax,
+              onChangeStart: (_) { if(!_coalescing){ _coalescing=true; _seqBefore = seq; } },
+              onChanged: (v) {
+                final off = curOff();
+                _applyEndCapLive(inst, model, attId, v, off);
+                if (_linkLR) {
+                  final cp = _counterpartId(attId);
+                  if (cp != null) {
+                    final xo = _mirrorXForLR ? -off.dx : off.dx;
+                    _applyEndCapLive(inst, model, cp, v, Offset(xo, off.dy));
+                  }
+                }
+              },
+              onChangeEnd: (_) {
+                if (_coalescing) {
+                  final before = _seqBefore!; final after = seq; _undo.push(UndoEntry('Adjust End Caps', (){ setState(()=> seq = before); }, (){ setState(()=> seq = after); })); _coalescing=false; _seqBefore=null;
+                }
+              },
+            ),
+          ), const SizedBox(width: 8),
+        ]),
+        // Offset X slider
+        Row(children:[
+          const SizedBox(width: 8), const Text('X'), Expanded(
+            child: Slider(
+              value: o0.dx.clamp(-60.0, 60.0), min: -60, max: 60,
+              onChangeStart: (_) { if(!_coalescing){ _coalescing=true; _seqBefore = seq; } },
+              onChanged: (v) {
+                final rad = curRad();
+                final oy = curOff().dy;
+                _applyEndCapLive(inst, model, attId, rad, Offset(v, oy));
+                if (_linkLR) {
+                  final cp = _counterpartId(attId);
+                  if (cp != null) {
+                    final vx = _mirrorXForLR ? -v : v;
+                    _applyEndCapLive(inst, model, cp, rad, Offset(vx, oy));
+                  }
+                }
+              },
+              onChangeEnd: (_) {
+                if (_coalescing) {
+                  final before = _seqBefore!; final after = seq; _undo.push(UndoEntry('Adjust End Caps', (){ setState(()=> seq = before); }, (){ setState(()=> seq = after); })); _coalescing=false; _seqBefore=null;
+                }
+              },
+            ),
+          ), const SizedBox(width: 8),
+        ]),
+        // Offset Y slider
+        Row(children:[
+          const SizedBox(width: 8), const Text('Y'), Expanded(
+            child: Slider(
+              value: o0.dy.clamp(-60.0, 60.0), min: -60, max: 60,
+              onChangeStart: (_) { if(!_coalescing){ _coalescing=true; _seqBefore = seq; } },
+              onChanged: (v) {
+                final rad = curRad();
+                final ox = curOff().dx;
+                _applyEndCapLive(inst, model, attId, rad, Offset(ox, v));
+                if (_linkLR) {
+                  final cp = _counterpartId(attId);
+                  if (cp != null) {

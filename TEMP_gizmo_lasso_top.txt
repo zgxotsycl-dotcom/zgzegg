@@ -1,0 +1,160 @@
+        final m = widget.models[cand.modelId];
+        if (m == null) continue;
+        if (_hitTestInstanceBounds(e.position, cand, m)) {
+          widget.onSelect?.call(cand.id);
+          pick = cand;
+          pickModel = m;
+          break;
+        }
+      }
+    }
+    // If pick failed, fall back: current selection or top-most instance
+    if (pick.id.isEmpty || pickModel == null) {
+      if (inst.id.isNotEmpty && model != null) {
+        pick = inst; pickModel = model;
+      } else if (widget.sequence.instances.isNotEmpty) {
+        final top = widget.sequence.instances.last;
+        final m = widget.models[top.modelId];
+        if (m != null) {
+          widget.onSelect?.call(top.id);
+          pick = top; pickModel = m;
+        }
+      }
+    }
+    // Smart tool: bone hit -> rotate, else base move
+    if (widget.tool == 'smart') {
+      // 뼈대 선택/회전 우선, 실패 시 베이스 이동 (별도 모드 구분 없음)
+      final hit = _hitTestBone(e.position, pick, pickModel!);
+      if (hit != null && hit.isNotEmpty) {
+        DebugLog.show('Hit bone: ' + hit);
+        widget.onEditStart?.call();
+        setState(() { _dragRotBoneId = hit; _dragInstId = pick.id; });
+        _dragPointerStart = e.position;
+        _dragPointerCurrent = e.position;
+        return;
+      }
+      // 베이스 이동 시작
+      final parentW = _instanceParentWorld(widget.sequence.instances, pick, widget.t, widget.sequence.setting.interpolate);
+      widget.onEditStart?.call();
+      DebugLog.show('Move base');
+      _dragBase = true;
+      _dragInstId = pick.id;
+      _dragPointerStart = e.position;
+      _dragPointerCurrent = e.position;
+      _parentWorldAtStart = parentW;
+      final bt = pick.baseTrack;
+      final tr = bt == null ? pick.base : sampleTransform(bt, widget.t, interpolate: widget.sequence.setting.interpolate);
+      _baseStartPos = tr.pos;
+      return;
+    }
+    if (widget.tool == 'lasso') {
+      final world = (e.position - widget.viewportOffset) / widget.viewportScale;
+      // If selection exists, hit test scale/rotate handles first, then move region, else start drawing polygon
+      if (_lassoSelection.isNotEmpty && _lassoCenterWorld != null) {
+        final centerS = _worldToScreen(_lassoCenterWorld!);
+        // Scale handle to the right
+        final scaleHandle = centerS + const Offset(40, 0);
+        const hr = 16.0;
+        if ((e.position - scaleHandle).distance <= hr) {
+          widget.onEditStart?.call();
+          _lassoScale = true;
+          final world = (e.position - widget.viewportOffset) / widget.viewportScale;
+          final v = world - _lassoCenterWorld!;
+          _lassoBaseLen = v.distance.clamp(1e-3, 1e9);
+          _lassoLastFactor = 1.0;
+          return;
+        }
+        final rotHandle = centerS + const Offset(0, -40);
+        
+        if ((e.position - rotHandle).distance <= hr) {
+          widget.onEditStart?.call();
+          _lassoRotate = true;
+          _lassoLastAngle = math.atan2((world - _lassoCenterWorld!).dy, (world - _lassoCenterWorld!).dx);
+          return;
+        }
+        // Else start move
+        widget.onEditStart?.call();
+        _lassoMove = true;
+        _lassoMoveStartWorld = world;
+        return;
+      }
+      // Start drawing polygon
+      _lassoDrawing = true;
+      _lassoPoints
+        ..clear()
+        ..add(e.position);
+      return;
+    }
+    // Instance base move (non-bone mode)
+    if (widget.tool == 'move') {
+      // 기본 동작을 SF처럼 단순화: 선택된 인스턴스가 있고 Move 도구면 어디서 눌러도 이동 시작
+      final parentW = _instanceParentWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+      widget.onEditStart?.call();
+      DebugLog.show('Move base');
+      _dragBase = true;
+      _dragInstId = inst.id;
+      _dragPointerStart = e.position;
+      _dragPointerCurrent = e.position;
+      _parentWorldAtStart = parentW;
+      final bt = inst.baseTrack;
+      final tr = bt == null ? inst.base : sampleTransform(bt, widget.t, interpolate: widget.sequence.setting.interpolate);
+      _baseStartPos = tr.pos;
+      return;
+    }
+
+    // Instance base rotate (non-bone mode)
+    if (widget.tool == 'rotate') {
+      final parentW = _instanceParentWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+      final instW = _instanceWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+      final pivotWorld = _tx(instW, Offset(inst.pivot.x, inst.pivot.y));
+      final pivotScreen = _worldToScreen(pivotWorld);
+      final radius = widget.sequence.setting.hitTolerancePx * 0.9;
+      if ((e.position - pivotScreen).distance <= radius) {
+        widget.onEditStart?.call();
+        DebugLog.show('Rotate base');
+        _dragBaseRotate = true;
+        _dragInstId = inst.id;
+        _dragPointerStart = e.position;
+        _dragPointerCurrent = e.position;
+        _parentWorldAtStart = parentW;
+        final bt = inst.baseTrack;
+        final tr = bt == null ? inst.base : sampleTransform(bt, widget.t, interpolate: widget.sequence.setting.interpolate);
+        _baseStartRotDeg = tr.rotDeg;
+        return;
+      }
+    }
+
+    if (!(widget.boneMode || widget.tool == 'ik')) return;
+    if (model == null) return;
+    // Hit-test pole vector handle if IK tool active
+    if (widget.tool == 'ik') {
+      final hit = _hitTestPoleHandle(e.position, inst, model);
+      if (hit != null) {
+        widget.onEditStart?.call();
+        setState(() {
+          _activePoleBoneId = _activePoleBoneId == hit ? null : hit; // toggle emphasis
+          _dragPoleBoneId = hit; // start dragging
+          _dragInstId = inst.id;
+        });
+        return;
+      }
+
+      // Hit test end-effector handle for selected chain
+      final eff = _hitTestEndEffector(e.position, inst, model);
+      if (eff != null) {
+        widget.onEditStart?.call();
+        setState(() { _dragIkBoneId = eff; _dragInstId = inst.id; });
+        return;
+      }
+
+      // Global end-effector hit-test (no prior selection needed)
+      final globalEff = _hitTestEndEffectorGlobal(e.position, inst, model);
+      if (globalEff != null) {
+        widget.onSelectBone?.call(globalEff);
+        widget.onEditStart?.call();
+        setState(() { _dragIkBoneId = globalEff; _dragInstId = inst.id; });
+        return;
+      }
+    }
+    // Select bone by tapping near pivot or axis
+    final sel = _hitTestBone(e.position, inst, model);

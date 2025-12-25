@@ -1,0 +1,65 @@
+import 'package:flutter/material.dart';
+
+class QuickToolPalette extends StatelessWidget {
+  final Offset anchor;
+  final void Function(String tool) onSelect;
+  const QuickToolPalette({super.key, required this.anchor, required this.onSelect});
+
+  @override
+  Widget build(BuildContext context) {
+    final items = <_ToolItem>[
+      _ToolItem('smart', Icons.auto_fix_high, '자동'),
+      _ToolItem('move', Icons.open_with, '이동'),
+      _ToolItem('rotate', Icons.rotate_right, '회전'),
+      _ToolItem('scale', Icons.aspect_ratio, '스케일'),
+      _ToolItem('ik', Icons.ads_click, 'IK'),
+      _ToolItem('lasso', Icons.gesture, '라쏘'),
+    ];
+    // Keep inside screen bounds
+    final size = MediaQuery.of(context).size;
+    final dx = anchor.dx.clamp(12, size.width - 12 - 280).toDouble();
+    final dy = anchor.dy.clamp(12, size.height - 12 - 56).toDouble();
+    return Positioned(
+      left: dx,
+      top: dy,
+      child: Material(
+        color: Theme.of(context).colorScheme.surface.withOpacity(0.95),
+        elevation: 10,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final it in items)
+                IconButton(
+                  tooltip: _labelFor(it.key, it.label),
+                  onPressed: () => onSelect(it.key),
+                  icon: Icon(it.icon, size: 20),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ToolItem {
+  final String key;
+  final IconData icon;
+  final String label;
+  const _ToolItem(this.key, this.icon, this.label);
+}
+
+String _labelFor(String key, String fallback) {
+  switch (key) {
+    case 'smart': return '자동';
+    case 'move': return '이동';
+    case 'rotate': return '회전';
+    case 'scale': return '스케일';
+    case 'ik': return 'IK';
+    case 'lasso': return '라쏘';
+    default: return fallback;
+  }
+}

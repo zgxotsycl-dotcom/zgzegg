@@ -1,0 +1,130 @@
+        // Else start move
+        widget.onEditStart?.call();
+        _lassoMove = true;
+        _lassoMoveStartWorld = world;
+        return;
+      }
+      // Start drawing polygon
+      _lassoDrawing = true;
+      _lassoPoints
+        ..clear()
+        ..add(e.position);
+      return;
+    }
+    // Instance base move (non-bone mode)
+    if (widget.tool == 'move') {
+      // 기본 동작을 SF처럼 단순화: 선택된 인스턴스가 있고 Move 도구면 어디서 눌러도 이동 시작
+      final parentW = _instanceParentWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+      widget.onEditStart?.call();
+      _dragBase = true;
+      _dragInstId = inst.id;
+      _dragPointerStart = e.position;
+      _dragPointerCurrent = e.position;
+      _parentWorldAtStart = parentW;
+      final bt = inst.baseTrack;
+      final tr = bt == null ? inst.base : sampleTransform(bt, widget.t, interpolate: widget.sequence.setting.interpolate);
+      _baseStartPos = tr.pos;
+      return;
+    }
+
+    // Instance base rotate (non-bone mode)
+    if (widget.tool == 'rotate') {
+      final parentW = _instanceParentWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+      final instW = _instanceWorld(widget.sequence.instances, inst, widget.t, widget.sequence.setting.interpolate);
+      final pivotWorld = _tx(instW, Offset(inst.pivot.x, inst.pivot.y));
+      final pivotScreen = _worldToScreen(pivotWorld);
+      const radius = 22.0;
+      if ((e.position - pivotScreen).distance <= radius) {
+        widget.onEditStart?.call();
+        _dragBaseRotate = true;
+        _dragInstId = inst.id;
+        _dragPointerStart = e.position;
+        _dragPointerCurrent = e.position;
+        _parentWorldAtStart = parentW;
+        final bt = inst.baseTrack;
+        final tr = bt == null ? inst.base : sampleTransform(bt, widget.t, interpolate: widget.sequence.setting.interpolate);
+        _baseStartRotDeg = tr.rotDeg;
+        return;
+      }
+    }
+
+    if (!(widget.boneMode || widget.tool == 'ik')) return;
+    if (model == null) return;
+    // Hit-test pole vector handle if IK tool active
+    if (widget.tool == 'ik') {
+      final hit = _hitTestPoleHandle(e.position, inst, model);
+      if (hit != null) {
+        widget.onEditStart?.call();
+        setState(() {
+          _activePoleBoneId = _activePoleBoneId == hit ? null : hit; // toggle emphasis
+          _dragPoleBoneId = hit; // start dragging
+          _dragInstId = inst.id;
+        });
+        return;
+      }
+
+      // Hit test end-effector handle for selected chain
+      final eff = _hitTestEndEffector(e.position, inst, model);
+      if (eff != null) {
+        widget.onEditStart?.call();
+        setState(() { _dragIkBoneId = eff; _dragInstId = inst.id; });
+        return;
+      }
+
+      // Global end-effector hit-test (no prior selection needed)
+      final globalEff = _hitTestEndEffectorGlobal(e.position, inst, model);
+      if (globalEff != null) {
+        widget.onSelectBone?.call(globalEff);
+        widget.onEditStart?.call();
+        setState(() { _dragIkBoneId = globalEff; _dragInstId = inst.id; });
+        return;
+      }
+    }
+    // Select bone by tapping near pivot or axis
+    final sel = _hitTestBone(e.position, inst, model);
+    if (sel != null) {
+      widget.onSelectBone?.call(sel);
+      // Begin rotate drag if in rotate tool
+      if (widget.boneMode && widget.tool == 'rotate') {
+        widget.onEditStart?.call();
+        _dragRotBoneId = sel; _dragInstId = inst.id;
+        _dragPointerStart = e.position;
+        _dragPointerCurrent = e.position;
+        return;
+      }
+      return;
+    }
+  }
+
+  void _onPointerMove(PointerMoveEvent e, Instance inst, Model model) {
+    if (widget.tool == 'lasso') {
+      if (_lassoRotate && _lassoCenterWorld != null) {
+        final world = (e.position - widget.viewportOffset) / widget.viewportScale;
+        final ang = math.atan2((world - _lassoCenterWorld!).dy, (world - _lassoCenterWorld!).dx);
+        final delta = ang - _lassoLastAngle;
+        _applyLassoRotate(inst, model, delta * 180.0 / math.pi);
+        _lassoLastAngle = ang;
+        return;
+      }
+      if (_lassoScale && _lassoCenterWorld != null) {
+        final world = (e.position - widget.viewportOffset) / widget.viewportScale;
+        final v = world - _lassoCenterWorld!;
+        final len = v.distance.clamp(1e-3, 1e9);
+        final factor = (len / _lassoBaseLen).clamp(0.1, 10.0);
+        final deltaFactor = factor / (_lassoLastFactor <= 1e-6 ? 1.0 : _lassoLastFactor);
+        if (deltaFactor > 0.0 && deltaFactor.isFinite) {
+          _applyLassoScale(inst, model, deltaFactor);
+          _lassoLastFactor = factor;
+        }
+        return;
+      }
+      if (_lassoMove) {
+        final world = (e.position - widget.viewportOffset) / widget.viewportScale;
+        final delta = world - _lassoMoveStartWorld;
+        _applyLassoTranslate(inst, model, delta);
+        _lassoMoveStartWorld = world;
+        return;
+      }
+      if (_lassoDrawing) {
+        _lassoPoints.add(e.position);
+        setState(() {});

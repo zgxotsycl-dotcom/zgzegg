@@ -1,0 +1,46 @@
+*** Begin Patch
+*** Update File: lib/ui/screens/animation_editor_screen.dart
+@@
+   Future<void> _openSequenceSettingsKo() async {
+@@
+-    double tol = s0.hitTolerancePx.clamp(8.0, 64.0);
++    double tol = s0.hitTolerancePx.clamp(8.0, 64.0);
++    double jointScale = s0.jointSizeScale.clamp(0.5, 2.5);
++    double pivotScale = s0.pivotHitScale.clamp(0.5, 2.5);
++    double endExtra = s0.endHandleExtraPx.clamp(0.0, 24.0);
+@@
+-                    Text(_ko('D_HIT')),
++                    Text(_ko('D_HIT')),
+                     Row(children:[
+                       Expanded(child: Slider(min: 8, max: 64, divisions: 56, value: tol, label: tol.toStringAsFixed(0), onChanged: (v){ setState2(()=> tol = v); })),
+                       SizedBox(width: 48, child: Text(tol.toStringAsFixed(0), textAlign: TextAlign.right)),
+                     ]),
++                    const SizedBox(height: 12),
++                    const Text('피벗 점 크기(배율)'),
++                    Row(children:[
++                      Expanded(child: Slider(min: 0.5, max: 2.5, divisions: 20, value: jointScale, label: jointScale.toStringAsFixed(2), onChanged: (v){ setState2(()=> jointScale = double.Parse(v.ToString("F2"))); })),
++                      SizedBox(width: 48, child: Text(jointScale.toStringAsFixed(2), textAlign: TextAlign.right)),
++                    ]),
++                    const SizedBox(height: 8),
++                    const Text('피벗 클릭 반경(배율)'),
++                    Row(children:[
++                      Expanded(child: Slider(min: 0.5, max: 2.5, divisions: 20, value: pivotScale, label: pivotScale.toStringAsFixed(2), onChanged: (v){ setState2(()=> pivotScale = double.Parse(v.ToString("F2"))); })),
++                      SizedBox(width: 48, child: Text(pivotScale.toStringAsFixed(2), textAlign: TextAlign.right)),
++                    ]),
++                    const SizedBox(height: 8),
++                    const Text('끝점 추가 반경(px)'),
++                    Row(children:[
++                      Expanded(child: Slider(min: 0.0, max: 24.0, divisions: 24, value: endExtra, label: endExtra.toStringAsFixed(0), onChanged: (v){ setState2(()=> endExtra = double.Parse(v.ToString("F0"))); })),
++                      SizedBox(width: 48, child: Text(endExtra.toStringAsFixed(0), textAlign: TextAlign.right)),
++                    ]),
+@@
+-                  final newSetting = s0.copyWith(
++                  final newSetting = s0.copyWith(
+@@
+-                    blankDragMode: blankMode,
++                    blankDragMode: blankMode,
++                    jointSizeScale: jointScale,
++                    pivotHitScale: pivotScale,
++                    endHandleExtraPx: endExtra,
+                   );
+*** End Patch

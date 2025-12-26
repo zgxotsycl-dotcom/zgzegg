@@ -46,6 +46,7 @@ class _AnimationEditorScreenState extends State<AnimationEditorScreen> with Sing
 
   ui.Image? _frame;
   int _lastRenderedFrame = -1;
+  String? _lastRenderError;
 
   int get _totalFrames => _seq.setting.totalFrames.clamp(1, 1000000);
 
@@ -54,9 +55,10 @@ class _AnimationEditorScreenState extends State<AnimationEditorScreen> with Sing
     super.initState();
     _project = widget.project;
     _seq = widget.sequence;
-    _ticker = createTicker(_onTick)..start();
+    _ticker = createTicker(_onTick);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       _refreshFromRepo();
       _renderFrame();
     });
@@ -92,6 +94,7 @@ class _AnimationEditorScreenState extends State<AnimationEditorScreen> with Sing
   }
 
   void _refreshFromRepo() {
+    if (!mounted) return;
     final repo = context.read<AppState>().repo;
     final p = repo.projects.firstWhere(
       (p) => p.id == widget.project.id,
@@ -111,37 +114,56 @@ class _AnimationEditorScreenState extends State<AnimationEditorScreen> with Sing
   Future<void> _renderFrame() async {
     final repo = context.read<AppState>().repo;
 
-    final w0 = _seq.setting.width.toDouble();
-    final h0 = _seq.setting.height.toDouble();
+    final w0 = math.max(1.0, _seq.setting.width.toDouble());
+    final h0 = math.max(1.0, _seq.setting.height.toDouble());
     final q = _seq.setting.previewDownscale.clamp(0.5, 1.0);
-    double w = (w0 * q).clamp(320, w0);
-    double h = (h0 * q).clamp(180, h0);
-    w = (w ~/ 2 * 2).toDouble();
-    h = (h ~/ 2 * 2).toDouble();
+    final minW = math.min(320.0, w0);
+    final minH = math.min(180.0, h0);
+    final w = (w0 * q).clamp(minW, w0);
+    final h = (h0 * q).clamp(minH, h0);
 
     final bgPath = _seq.setting.backgroundImage;
     final luma = bgPath == null ? null : repo.imageCenterLuma[bgPath];
 
-    final img = Renderer.paintFrame(
-      seq: _seq,
-      models: repo.models,
-      images: repo.images,
-      tFrame: _t,
-      size: ui.Size(w, h),
-      interpolate: _seq.setting.interpolate,
-      showHelperJoints: false,
-      drawGrid: false,
-      bgCenterLuma: luma,
-    );
+    try {
+      final img = Renderer.paintFrame(
+        seq: _seq,
+        models: repo.models,
+        images: repo.images,
+        tFrame: _t,
+        size: ui.Size(w, h),
+        interpolate: _seq.setting.interpolate,
+        showHelperJoints: false,
+        drawGrid: false,
+        bgCenterLuma: luma,
+      );
 
-    if (!mounted) {
-      img.dispose();
-      return;
+      if (!mounted) {
+        img.dispose();
+        return;
+      }
+      setState(() {
+        _frame?.dispose();
+        _frame = img;
+        _lastRenderError = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _frame?.dispose();
+        _frame = null;
+        _playing = false;
+        _lastTick = Duration.zero;
+      });
+      _ticker.stop();
+      final msg = e.toString();
+      if (_lastRenderError != msg) {
+        _lastRenderError = msg;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Render failed: $msg')),
+        );
+      }
     }
-    setState(() {
-      _frame?.dispose();
-      _frame = img;
-    });
   }
 
   Future<void> _saveSeq(Sequence newSeq) async {
@@ -178,8 +200,8 @@ class _AnimationEditorScreenState extends State<AnimationEditorScreen> with Sing
       return;
     }
 
-    final w = _seq.setting.width.toDouble();
-    final h = _seq.setting.height.toDouble();
+    final w = math.max(1.0, _seq.setting.width.toDouble());
+    final h = math.max(1.0, _seq.setting.height.toDouble());
     final inst = Instance(
       id: _uuid.v4(),
       name: 'Stickman',
@@ -192,17 +214,15 @@ class _AnimationEditorScreenState extends State<AnimationEditorScreen> with Sing
   }
 
   Future<void> _openLayers() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      showDragHandle: true,
-      builder: (_) => _LayersSheet(
-        initialSequence: _seq,
-        onCommit: (seq) async {
-          await _saveSeq(seq);
-          await _renderFrame();
-        },
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _LayersScreen(
+          initialSequence: _seq,
+          onCommit: (seq) async {
+            await _saveSeq(seq);
+            await _renderFrame();
+          },
+        ),
       ),
     );
   }
@@ -211,6 +231,7 @@ class _AnimationEditorScreenState extends State<AnimationEditorScreen> with Sing
     setState(() {
       _playing = false;
       _lastTick = Duration.zero;
+      _ticker.stop();
       _t = (_t.floor() - 1).clamp(1, _totalFrames).toDouble();
     });
     _renderFrame();
@@ -220,6 +241,7 @@ class _AnimationEditorScreenState extends State<AnimationEditorScreen> with Sing
     setState(() {
       _playing = false;
       _lastTick = Duration.zero;
+      _ticker.stop();
       _t = (_t.floor() + 1).clamp(1, _totalFrames).toDouble();
     });
     _renderFrame();
@@ -230,9 +252,21 @@ class _AnimationEditorScreenState extends State<AnimationEditorScreen> with Sing
       _playing = !_playing;
       _lastTick = Duration.zero;
     });
+    if (_playing) {
+      if (!_ticker.isActive) _ticker.start();
+    } else {
+      _ticker.stop();
+    }
   }
 
   Future<void> _openPreview() async {
+    if (_playing) {
+      setState(() {
+        _playing = false;
+        _lastTick = Duration.zero;
+      });
+      _ticker.stop();
+    }
     final repo = context.read<AppState>().repo;
     await Navigator.of(context).push(
       MaterialPageRoute(
@@ -321,8 +355,8 @@ class _AnimationEditorScreenState extends State<AnimationEditorScreen> with Sing
 
   @override
   Widget build(BuildContext context) {
-    final stageW = _seq.setting.width.toDouble();
-    final stageH = _seq.setting.height.toDouble();
+    final stageW = math.max(1.0, _seq.setting.width.toDouble());
+    final stageH = math.max(1.0, _seq.setting.height.toDouble());
 
     return Scaffold(
       appBar: AppBar(
@@ -400,44 +434,49 @@ class _AnimationEditorScreenState extends State<AnimationEditorScreen> with Sing
         ),
       ),
       bottomNavigationBar: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Row(
-            children: [
-              IconButton(
-                tooltip: 'Prev frame',
-                icon: const Icon(Icons.chevron_left),
-                onPressed: _prevFrame,
-              ),
-              IconButton(
-                tooltip: _playing ? 'Pause' : 'Play',
-                icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
-                onPressed: _togglePlay,
-              ),
-              IconButton(
-                tooltip: 'Next frame',
-                icon: const Icon(Icons.chevron_right),
-                onPressed: _nextFrame,
-              ),
-              const SizedBox(width: 8),
-              Text('${_t.round()} / $_totalFrames'),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Slider(
-                  min: 1,
-                  max: _totalFrames.toDouble().clamp(1, 1000000),
-                  value: _t.clamp(1.0, _totalFrames.toDouble()),
-                  onChanged: (v) {
-                    setState(() {
-                      _playing = false;
-                      _lastTick = Duration.zero;
-                      _t = v;
-                    });
-                    _renderFrame();
-                  },
+        top: false,
+        child: SizedBox(
+          height: 72,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              children: [
+                IconButton(
+                  tooltip: 'Prev frame',
+                  icon: const Icon(Icons.chevron_left),
+                  onPressed: _prevFrame,
                 ),
-              ),
-            ],
+                IconButton(
+                  tooltip: _playing ? 'Pause' : 'Play',
+                  icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
+                  onPressed: _togglePlay,
+                ),
+                IconButton(
+                  tooltip: 'Next frame',
+                  icon: const Icon(Icons.chevron_right),
+                  onPressed: _nextFrame,
+                ),
+                const SizedBox(width: 8),
+                Text('${_t.round()} / $_totalFrames'),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Slider(
+                    min: 1,
+                    max: _totalFrames.toDouble().clamp(1, 1000000),
+                    value: _t.clamp(1.0, _totalFrames.toDouble()),
+                    onChanged: (v) {
+                      setState(() {
+                        _playing = false;
+                        _lastTick = Duration.zero;
+                        _ticker.stop();
+                        _t = v;
+                      });
+                      _renderFrame();
+                    },
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -452,20 +491,20 @@ enum _AddLayerKind {
   sprite,
 }
 
-class _LayersSheet extends StatefulWidget {
+class _LayersScreen extends StatefulWidget {
   final Sequence initialSequence;
   final Future<void> Function(Sequence) onCommit;
 
-  const _LayersSheet({
+  const _LayersScreen({
     required this.initialSequence,
     required this.onCommit,
   });
 
   @override
-  State<_LayersSheet> createState() => _LayersSheetState();
+  State<_LayersScreen> createState() => _LayersScreenState();
 }
 
-class _LayersSheetState extends State<_LayersSheet> {
+class _LayersScreenState extends State<_LayersScreen> {
   static const _uuid = Uuid();
 
   late Sequence _seq = widget.initialSequence;
@@ -497,49 +536,58 @@ class _LayersSheetState extends State<_LayersSheet> {
           _selectedId = null;
         }
       });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Save failed: $e')),
+      );
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
   Future<_AddLayerKind?> _pickAddKind() async {
-    return showModalBottomSheet<_AddLayerKind>(
+    return showDialog<_AddLayerKind>(
       context: context,
-      useSafeArea: true,
-      showDragHandle: true,
-      builder: (ctx) => Column(
-        mainAxisSize: MainAxisSize.min,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Add Layer'),
         children: [
-          const ListTile(title: Text('Add Layer')),
-          ListTile(
-            leading: const Icon(Icons.person_add_alt_1),
-            title: const Text('Stickman'),
-            onTap: () => Navigator.of(ctx).pop(_AddLayerKind.stickman),
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop(_AddLayerKind.stickman),
+            child: const ListTile(
+              leading: Icon(Icons.person_add_alt_1),
+              title: Text('Stickman'),
+            ),
           ),
-          ListTile(
-            leading: const Icon(Icons.category_outlined),
-            title: const Text('From model library'),
-            onTap: () => Navigator.of(ctx).pop(_AddLayerKind.model),
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop(_AddLayerKind.model),
+            child: const ListTile(
+              leading: Icon(Icons.category_outlined),
+              title: Text('From model library'),
+            ),
           ),
-          ListTile(
-            leading: const Icon(Icons.image_outlined),
-            title: const Text('Import image'),
-            onTap: () => Navigator.of(ctx).pop(_AddLayerKind.image),
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop(_AddLayerKind.image),
+            child: const ListTile(
+              leading: Icon(Icons.image_outlined),
+              title: Text('Import image'),
+            ),
           ),
-          ListTile(
-            leading: const Icon(Icons.collections_outlined),
-            title: const Text('Import sprite (multiple images)'),
-            onTap: () => Navigator.of(ctx).pop(_AddLayerKind.sprite),
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop(_AddLayerKind.sprite),
+            child: const ListTile(
+              leading: Icon(Icons.collections_outlined),
+              title: Text('Import sprite (multiple images)'),
+            ),
           ),
-          const SizedBox(height: 12),
         ],
       ),
     );
   }
 
   Instance _newInstanceForModel(Model model) {
-    final stageW = _seq.setting.width.toDouble();
-    final stageH = _seq.setting.height.toDouble();
+    final stageW = math.max(1.0, _seq.setting.width.toDouble());
+    final stageH = math.max(1.0, _seq.setting.height.toDouble());
 
     final imgAtt = model.attachments.where((a) => a.type == PrimType.image).firstOrNull;
     if (imgAtt != null) {
@@ -587,8 +635,8 @@ class _LayersSheetState extends State<_LayersSheet> {
           {
             final model = repo.models['stickman'];
             if (model == null) throw Exception('Stickman model is missing.');
-            final stageW = _seq.setting.width.toDouble();
-            final stageH = _seq.setting.height.toDouble();
+            final stageW = math.max(1.0, _seq.setting.width.toDouble());
+            final stageH = math.max(1.0, _seq.setting.height.toDouble());
             final inst = Instance(
               id: _uuid.v4(),
               name: _uniqueLayerName('Stickman'),
@@ -745,26 +793,19 @@ class _LayersSheetState extends State<_LayersSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final height = MediaQuery.sizeOf(context).height;
-
-    return SizedBox(
-      height: height * 0.85,
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Row(
-              children: [
-                Text('Layers ($_count)', style: Theme.of(context).textTheme.titleMedium),
-                const Spacer(),
-                FilledButton.icon(
-                  onPressed: _busy ? null : _addLayer,
-                  icon: const Icon(Icons.add),
-                  label: const Text('Add'),
-                ),
-              ],
-            ),
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Layers ($_count)'),
+        actions: [
+          IconButton(
+            tooltip: 'Add layer',
+            icon: const Icon(Icons.add),
+            onPressed: _busy ? null : _addLayer,
           ),
+        ],
+      ),
+      body: Column(
+        children: [
           const Divider(height: 1),
           Expanded(
             child: _count == 0

@@ -35,9 +35,8 @@ class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> 
   static String _localeCode(Locale l) => l.languageCode.toLowerCase();
 
   static Future<Map<String, String>> _loadJson(String path) async {
-    final s = await rootBundle.loadString(path);
+    final s = await rootBundle.loadString(path).timeout(const Duration(seconds: 2));
     final m = jsonDecode(s) as Map<String, dynamic>;
     return m.map((k, v) => MapEntry(k, v.toString()));
   }
 }
-

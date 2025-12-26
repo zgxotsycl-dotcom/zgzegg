@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/scheduler.dart';
 import 'dart:ui' as ui;
 import 'package:provider/provider.dart';
@@ -33,6 +34,7 @@ class _PreviewScreenState extends State<PreviewScreen> with SingleTickerProvider
   bool _playing = true;
   ui.Image? _frame;
   int _lastRenderedFrame = -1;
+  String? _lastRenderError;
   Duration _lastTick = Duration.zero;
   double _q = 0.7; // downscale factor
   bool _controlsVisible = true;
@@ -42,7 +44,8 @@ class _PreviewScreenState extends State<PreviewScreen> with SingleTickerProvider
   void initState() {
     super.initState();
     _q = widget.sequence.setting.previewDownscale.clamp(0.5, 1.0);
-    _ticker = createTicker(_onTick)..start();
+    _ticker = createTicker(_onTick);
+    if (_playing) _ticker.start();
   }
 
   void _onTick(Duration elapsed) {
@@ -62,44 +65,80 @@ class _PreviewScreenState extends State<PreviewScreen> with SingleTickerProvider
   }
 
   void _render() {
-    final w0 = widget.sequence.setting.width.toDouble();
-    final h0 = widget.sequence.setting.height.toDouble();
+    final w0 = math.max(1.0, widget.sequence.setting.width.toDouble());
+    final h0 = math.max(1.0, widget.sequence.setting.height.toDouble());
     // Fast preview: downscale internal render size and disable onion skin
     final double q = _q; // scale factor
-    double w = (w0 * q).clamp(320, w0);
-    double h = (h0 * q).clamp(180, h0);
-    w = (w ~/ 2 * 2).toDouble();
-    h = (h ~/ 2 * 2).toDouble();
+    final minW = math.min(320.0, w0);
+    final minH = math.min(180.0, h0);
+    final w = (w0 * q).clamp(minW, w0);
+    final h = (h0 * q).clamp(minH, h0);
 
     final seqNoOnion = widget.sequence.copyWith(
       onion: const OnionSkinSetting(prevFrames: 0, nextFrames: 0),
     );
     final bgPath = widget.sequence.setting.backgroundImage;
     final luma = bgPath == null ? null : context.read<AppState>().repo.imageCenterLuma[bgPath];
-    final img = Renderer.paintFrame(
-      seq: seqNoOnion,
-      models: widget.models,
-      images: widget.images,
-      tFrame: _t,
-      size: ui.Size(w, h),
-      interpolate: widget.sequence.setting.interpolate,
-      showHelperJoints: false,
-      drawGrid: false,
-      bgCenterLuma: luma,
-    );
-    setState(() { _frame = img; });
+
+    try {
+      final img = Renderer.paintFrame(
+        seq: seqNoOnion,
+        models: widget.models,
+        images: widget.images,
+        tFrame: _t,
+        size: ui.Size(w, h),
+        interpolate: widget.sequence.setting.interpolate,
+        showHelperJoints: false,
+        drawGrid: false,
+        bgCenterLuma: luma,
+      );
+      setState(() {
+        _frame?.dispose();
+        _frame = img;
+        _lastRenderError = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _frame?.dispose();
+        _frame = null;
+        _playing = false;
+        _lastTick = Duration.zero;
+      });
+      _ticker.stop();
+      final msg = e.toString();
+      if (_lastRenderError != msg) {
+        _lastRenderError = msg;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Render failed: $msg')));
+      }
+    }
+  }
+
+  void _togglePlay() {
+    setState(() {
+      _playing = !_playing;
+      _lastTick = Duration.zero;
+    });
+    if (_playing) {
+      if (!_ticker.isActive) _ticker.start();
+      _render();
+    } else {
+      _ticker.stop();
+    }
   }
 
   @override
   void dispose() {
     _ticker.dispose();
+    _frame?.dispose();
+    _hideTimer?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final w = widget.sequence.setting.width.toDouble();
-    final h = widget.sequence.setting.height.toDouble();
+    final w = math.max(1.0, widget.sequence.setting.width.toDouble());
+    final h = math.max(1.0, widget.sequence.setting.height.toDouble());
     return Scaffold(
       appBar: PreferredSize(
         preferredSize: const Size.fromHeight(kToolbarHeight),
@@ -117,7 +156,7 @@ class _PreviewScreenState extends State<PreviewScreen> with SingleTickerProvider
                 IconButton(
                   icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
                   tooltip: _playing ? AppLocalizations.of(context).t('preview.pause') : AppLocalizations.of(context).t('preview.play'),
-                  onPressed: () => setState(() => _playing = !_playing),
+                  onPressed: _togglePlay,
                 ),
                 PopupMenuButton<double>(
                   tooltip: AppLocalizations.of(context).t('preview.quality'),
@@ -163,23 +202,29 @@ class _PreviewScreenState extends State<PreviewScreen> with SingleTickerProvider
           curve: Curves.easeOut,
           child: IgnorePointer(
             ignoring: !_controlsVisible,
-            child: Padding(
-              padding: const EdgeInsets.all(12.0),
-              child: Row(
-                children: [
-                  Text('${_t.round()} / ${widget.totalFrames}'),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Slider(
-                      min: 1,
-                      max: widget.totalFrames.toDouble().clamp(1, 100000),
-                      value: _t.clamp(1, widget.totalFrames.toDouble()),
-                      onChanged: (v) { setState(() { _t = v; _render(); }); },
-                    ),
+            child: SafeArea(
+              top: false,
+              child: SizedBox(
+                height: 72,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Row(
+                    children: [
+                      Text('${_t.round()} / ${widget.totalFrames}'),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Slider(
+                          min: 1,
+                          max: widget.totalFrames.toDouble().clamp(1, 100000),
+                          value: _t.clamp(1, widget.totalFrames.toDouble()),
+                          onChanged: (v) { setState(() { _t = v; _render(); }); },
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Text('${widget.sequence.setting.fps}fps x${widget.sequence.setting.playbackRate.toStringAsFixed(2)}'),
+                    ],
                   ),
-                  const SizedBox(width: 12),
-                  Text('${widget.sequence.setting.fps}fps x${widget.sequence.setting.playbackRate.toStringAsFixed(2)}'),
-                ],
+                ),
               ),
             ),
           ),
@@ -188,4 +233,3 @@ class _PreviewScreenState extends State<PreviewScreen> with SingleTickerProvider
     );
   }
 }
-

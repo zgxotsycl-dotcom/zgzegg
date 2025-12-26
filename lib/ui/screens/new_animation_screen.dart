@@ -88,8 +88,8 @@ class _NewAnimationScreenState extends State<NewAnimationScreen> {
     final repo = context.read<AppState>().repo;
     try {
       final name = _nameCtl.text.trim().isEmpty ? 'My Animation' : _nameCtl.text.trim();
-      final w = int.tryParse(_wCtl.text.trim()) ?? 1280;
-      final h = int.tryParse(_hCtl.text.trim()) ?? 720;
+      final w = (int.tryParse(_wCtl.text.trim()) ?? 1280).clamp(1, 16384);
+      final h = (int.tryParse(_hCtl.text.trim()) ?? 720).clamp(1, 16384);
       final setting = SequenceSetting(fps: _fps, width: w, height: h, totalFrames: 1, interpolate: false);
       final p = await repo.createProject(name);
       final s = await repo.createSequenceWithSetting(p, 'Scene 1', setting);

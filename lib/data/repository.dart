@@ -4,7 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:archive/archive.dart';
-import 'package:flutter/services.dart' show rootBundle;
+import 'package:flutter/services.dart' show MissingPluginException, rootBundle;
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
@@ -25,14 +25,29 @@ class DataRepository {
   Directory get imagesDir => Directory(path.join(appDir.path, 'images'));
 
   Future<void> init() async {
-    appDir = await getApplicationDocumentsDirectory();
+    final isFlutterTest = Platform.environment['FLUTTER_TEST'] == 'true';
+    if (isFlutterTest) {
+      appDir = Directory(path.join(Directory.systemTemp.path, 'bokuanimator_test'));
+    } else {
+      try {
+        appDir = await getApplicationDocumentsDirectory().timeout(const Duration(seconds: 2));
+      } on TimeoutException {
+        appDir = Directory(path.join(Directory.systemTemp.path, 'bokuanimator'));
+      } on MissingPluginException {
+        appDir = Directory(path.join(Directory.systemTemp.path, 'bokuanimator'));
+      } catch (_) {
+        appDir = Directory(path.join(Directory.systemTemp.path, 'bokuanimator'));
+      }
+    }
+    if (!appDir.existsSync()) appDir.createSync(recursive: true);
     if (!imagesDir.existsSync()) imagesDir.createSync(recursive: true);
     await _loadModels();
     // Always refresh stickman from current profile so new spec takes precedence over user file
     try {
       final profile = await _loadStickProfileFromDisk();
-      await applyStickProfile(profile); // writes to user dir and updates models
+      await applyStickProfile(profile, persist: false);
     } catch (_) {}
+    models.putIfAbsent('stickman', () => generateStickmanFromProfile(const StickProfile()));
     await _loadProjects();
     // Ensure existing projects migrate any stick-figure instances to updated stickman
     try { await migrateStickFiguresToStickman(); } catch (_) {}
@@ -50,8 +65,10 @@ class DataRepository {
   Future<StickProfile> _loadStickProfileFromDisk() async {
     try {
       final f = File(path.join(appDir.path, 'presets', 'stick_profile.json'));
-      if (await f.exists()) {
-        final j = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+      final exists = await f.exists().timeout(const Duration(seconds: 2), onTimeout: () => false);
+      if (exists) {
+        final raw = await f.readAsString().timeout(const Duration(seconds: 2));
+        final j = jsonDecode(raw) as Map<String, dynamic>;
         return StickProfile.fromJson(j);
       }
     } catch (_) {}
@@ -64,8 +81,10 @@ class DataRepository {
   Future<void> _loadEasingPresets() async {
     try {
       final f = _easingFile;
-      if (await f.exists()) {
-        final j = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+      final exists = await f.exists().timeout(const Duration(seconds: 2), onTimeout: () => false);
+      if (exists) {
+        final raw = await f.readAsString().timeout(const Duration(seconds: 2));
+        final j = jsonDecode(raw) as Map<String, dynamic>;
         easingPresets
           ..clear()
           ..addAll(j.map((k, v) => MapEntry(k, v.toString())));
@@ -95,8 +114,10 @@ class DataRepository {
   Future<void> _loadPoseLibrary() async {
     try {
       final f = _poseFile;
-      if (await f.exists()) {
-        final j = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+      final exists = await f.exists().timeout(const Duration(seconds: 2), onTimeout: () => false);
+      if (exists) {
+        final raw = await f.readAsString().timeout(const Duration(seconds: 2));
+        final j = jsonDecode(raw) as Map<String, dynamic>;
         poseLibrary
           ..clear()
           ..addAll(j.map((k, v) => MapEntry(k, (v as Map<String, dynamic>).map((bk, bv) => MapEntry(bk, (bv as num).toDouble())))));
@@ -116,8 +137,10 @@ class DataRepository {
   Future<void> _loadPoseMeta() async {
     try {
       final f = _poseMetaFile;
-      if (await f.exists()) {
-        final j = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+      final exists = await f.exists().timeout(const Duration(seconds: 2), onTimeout: () => false);
+      if (exists) {
+        final raw = await f.readAsString().timeout(const Duration(seconds: 2));
+        final j = jsonDecode(raw) as Map<String, dynamic>;
         poseMeta
           ..clear()
           ..addAll(j.map((k, v) => MapEntry(k, PoseMeta.fromJson(v as Map<String, dynamic>))));
@@ -217,7 +240,7 @@ class DataRepository {
     ];
     for (final p in defaultAssets) {
       try {
-        final s = await rootBundle.loadString(p);
+        final s = await rootBundle.loadString(p).timeout(const Duration(seconds: 2));
         final m = Model.fromJson(jsonDecode(s));
         models[m.id] = m;
       } catch (_) {}
@@ -268,10 +291,16 @@ class DataRepository {
     }
   }
 
-  // Overwrite the default 'stickman' model from a numeric profile and persist it
-  Future<void> applyStickProfile(StickProfile profile) async {
+  // Overwrite the default 'stickman' model from a numeric profile.
+  // `persist=false` avoids blocking init on disk I/O (we can always regenerate from the profile).
+  Future<void> applyStickProfile(StickProfile profile, {bool persist = true}) async {
     final m = generateStickmanFromProfile(profile);
-    await saveUserModel(m);
+    models[m.id] = m;
+    if (persist) {
+      try {
+        await saveUserModel(m).timeout(const Duration(seconds: 2));
+      } catch (_) {}
+    }
     // Also migrate any stick-figure like instances to use the refreshed 'stickman'
     try { await migrateStickFiguresToStickman(); } catch (_) {}
   }
@@ -346,17 +375,26 @@ class DataRepository {
   File get _projectsFile => File(path.join(appDir.path, 'projects.json'));
 
   Future<void> _loadProjects() async {
-    if (await _projectsFile.exists()) {
-      final s = await _projectsFile.readAsString();
-      final j = jsonDecode(s) as List;
-      projects.clear();
-      for (final pjs in j) {
-        projects.add(_projectFromJson(pjs));
-      }
-      // Migrate to 1-based frames so frame 0 does not exist in data
-      _migrateOneBasedFrames();
-      await _saveProjects();
+    final isFlutterTest = Platform.environment['FLUTTER_TEST'] == 'true';
+
+    final exists = await _projectsFile.exists().timeout(
+      const Duration(seconds: 2),
+      onTimeout: () {
+        if (isFlutterTest) return false;
+        throw TimeoutException('Timed out checking projects file');
+      },
+    );
+    if (!exists) return;
+
+    final s = await _projectsFile.readAsString().timeout(const Duration(seconds: 5));
+    final j = jsonDecode(s) as List;
+    projects.clear();
+    for (final pjs in j) {
+      projects.add(_projectFromJson(pjs));
     }
+    // Migrate to 1-based frames so frame 0 does not exist in data
+    _migrateOneBasedFrames();
+    await _saveProjects().timeout(const Duration(seconds: 5));
   }
 
   void _migrateOneBasedFrames() {
@@ -474,7 +512,11 @@ class DataRepository {
 
   Future<void> _saveProjects() async {
     final j = projects.map(_projectToJson).toList();
-    await _projectsFile.writeAsString(const JsonEncoder.withIndent('  ').convert(j));
+    try {
+      await _projectsFile
+          .writeAsString(const JsonEncoder.withIndent('  ').convert(j))
+          .timeout(const Duration(seconds: 5));
+    } catch (_) {}
   }
 
   Map<String, dynamic> _projectToJson(Project p) => {
@@ -537,49 +579,72 @@ class DataRepository {
             .toList(),
       };
 
-  Sequence _sequenceFromJson(Map<String, dynamic> j) => Sequence(
-        id: j['id'],
-        name: j['name'],
-        setting: SequenceSetting(
-          fps: j['setting']['fps'],
-          width: j['setting']['width'],
-          height: j['setting']['height'],
-          playbackRate: (j['setting']['playbackRate'] ?? 1.0) * 1.0,
-          totalFrames: (j['setting']['totalFrames'] ?? 300) as int,
-          interpolate: (j['setting']['interpolate'] ?? true) as bool,
-          heightWidthRatio: ((j['setting']['heightWidthRatio'] as num?)?.toDouble()) ?? ((j['setting']['height'] as num).toDouble() / (j['setting']['width'] as num).toDouble()),
-          backgroundColor: ui.Color((j['setting']['backgroundColor'] as int?) ?? 0xFFFFFFFF),
-          backgroundImage: (j['setting']['backgroundImage'] as String?),
-          previewDownscale: ((j['setting']['previewDownscale'] as num?)?.toDouble()) ?? 0.7,
-          hitTolerancePx: ((j['setting']['hitTolerancePx'] as num?)?.toDouble()) ?? 32.0,
-          enforceLengthLock: (j['setting']['enforceLengthLock'] as bool?) ?? true,
-          anchorWriteOnEdit: (j['setting']['anchorWriteOnEdit'] as bool?) ?? true,
-          smartIkPriority: (j['setting']['smartIkPriority'] as bool?) ?? true,
-          autoStrokeContrast: (j['setting']['autoStrokeContrast'] as bool?) ?? true,
-          minStrokeContrast: ((j['setting']['minStrokeContrast'] as num?)?.toDouble()) ?? 3.0,
-          lassoPivot: (j['setting']['lassoPivot'] as String?) ?? 'mass',
-          blankDragMode: (j['setting']['blankDragMode'] as String?) ?? 'layer',
-          jointSizeScale: ((j['setting']['jointSizeScale'] as num?)?.toDouble()) ?? 1.0,
-          pivotHitScale: ((j['setting']['pivotHitScale'] as num?)?.toDouble()) ?? 1.0,
-          endHandleExtraPx: ((j['setting']['endHandleExtraPx'] as num?)?.toDouble()) ?? 6.0,
-        ),
-        onion: OnionSkinSetting(
-          prevFrames: j['onion']['prevFrames'],
-          nextFrames: j['onion']['nextFrames'],
-          opacityFalloff: (j['onion']['opacityFalloff'] as num).toDouble(),
-          prevColor: ui.Color(j['onion']['prevColor']),
-          nextColor: ui.Color(j['onion']['nextColor']),
-        ),
-        instances: (j['instances'] as List).map((e) => _instanceFromJson(e)).toList(),
-        audio: (j['audio'] as List? ?? [])
-            .map((a) => AudioTrack(
-                  path: a['path'],
-                  offsetSec: (a['offsetSec'] ?? 0) * 1.0,
-                  gain: (a['gain'] ?? 1.0) * 1.0,
-                  mute: (a['mute'] ?? false) as bool,
-                ))
-            .toList(),
-      );
+  Sequence _sequenceFromJson(Map<String, dynamic> j) {
+    final settingJson = (j['setting'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
+
+    final fps = (settingJson['fps'] as num?)?.toInt() ?? 30;
+    final width = ((settingJson['width'] as num?)?.toInt() ?? 1280).clamp(1, 16384);
+    final height = ((settingJson['height'] as num?)?.toInt() ?? 720).clamp(1, 16384);
+    final playbackRate = (settingJson['playbackRate'] as num?)?.toDouble() ?? 1.0;
+    final totalFrames = ((settingJson['totalFrames'] as num?)?.toInt() ?? 300).clamp(1, 1000000);
+    final interpolate = (settingJson['interpolate'] as bool?) ?? true;
+    final heightWidthRatio = (settingJson['heightWidthRatio'] as num?)?.toDouble() ?? (height / width);
+    final backgroundColor = ui.Color((settingJson['backgroundColor'] as num?)?.toInt() ?? 0xFFFFFFFF);
+    final backgroundImage = settingJson['backgroundImage'] as String?;
+
+    final onionJson = (j['onion'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
+    final prevFrames = ((onionJson['prevFrames'] as num?)?.toInt() ?? 3).clamp(0, 999);
+    final nextFrames = ((onionJson['nextFrames'] as num?)?.toInt() ?? 3).clamp(0, 999);
+    final opacityFalloff = (onionJson['opacityFalloff'] as num?)?.toDouble() ?? 0.6;
+    final prevColor = ui.Color((onionJson['prevColor'] as num?)?.toInt() ?? 0x44FF0000);
+    final nextColor = ui.Color((onionJson['nextColor'] as num?)?.toInt() ?? 0x440000FF);
+
+    return Sequence(
+      id: j['id'],
+      name: j['name'],
+      setting: SequenceSetting(
+        fps: fps,
+        width: width,
+        height: height,
+        playbackRate: playbackRate,
+        totalFrames: totalFrames,
+        interpolate: interpolate,
+        heightWidthRatio: heightWidthRatio,
+        backgroundColor: backgroundColor,
+        backgroundImage: backgroundImage,
+        previewDownscale: (settingJson['previewDownscale'] as num?)?.toDouble() ?? 0.7,
+        hitTolerancePx: (settingJson['hitTolerancePx'] as num?)?.toDouble() ?? 32.0,
+        enforceLengthLock: (settingJson['enforceLengthLock'] as bool?) ?? true,
+        anchorWriteOnEdit: (settingJson['anchorWriteOnEdit'] as bool?) ?? true,
+        smartIkPriority: (settingJson['smartIkPriority'] as bool?) ?? true,
+        autoStrokeContrast: (settingJson['autoStrokeContrast'] as bool?) ?? true,
+        minStrokeContrast: (settingJson['minStrokeContrast'] as num?)?.toDouble() ?? 3.0,
+        lassoPivot: (settingJson['lassoPivot'] as String?) ?? 'mass',
+        blankDragMode: (settingJson['blankDragMode'] as String?) ?? 'layer',
+        jointSizeScale: (settingJson['jointSizeScale'] as num?)?.toDouble() ?? 1.0,
+        pivotHitScale: (settingJson['pivotHitScale'] as num?)?.toDouble() ?? 1.0,
+        endHandleExtraPx: (settingJson['endHandleExtraPx'] as num?)?.toDouble() ?? 6.0,
+      ),
+      onion: OnionSkinSetting(
+        prevFrames: prevFrames,
+        nextFrames: nextFrames,
+        opacityFalloff: opacityFalloff,
+        prevColor: prevColor,
+        nextColor: nextColor,
+      ),
+      instances: (j['instances'] as List? ?? const []).map((e) => _instanceFromJson(e)).toList(),
+      audio: (j['audio'] as List? ?? const [])
+          .map(
+            (a) => AudioTrack(
+              path: a['path'],
+              offsetSec: (a['offsetSec'] as num?)?.toDouble() ?? 0.0,
+              gain: (a['gain'] as num?)?.toDouble() ?? 1.0,
+              mute: (a['mute'] as bool?) ?? false,
+            ),
+          )
+          .toList(),
+    );
+  }
 
   Map<String, dynamic> _instanceToJson(Instance i) => {
         'id': i.id,
@@ -695,9 +760,10 @@ class DataRepository {
       final f = File(absPath);
       if (!await f.exists()) return;
       final bytes = await f.readAsBytes();
-      final c = Completer<ui.Image>();
-      ui.decodeImageFromList(Uint8List.fromList(bytes), (img) => c.complete(img));
-      final img = await c.future;
+      final codec = await ui.instantiateImageCodec(Uint8List.fromList(bytes));
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      final img = frame.image;
       images[absPath] = img;
       try {
         final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
@@ -782,7 +848,18 @@ class DataRepository {
   Future<Sequence> createSequenceWithSetting(Project p, String name, SequenceSetting setting) async {
     final s = Sequence(id: _uuid.v4(), name: name, setting: setting, onion: const OnionSkinSetting(), instances: [], audio: const []);
     final idx = projects.indexWhere((x) => x.id == p.id);
-    projects[idx] = Project(id: p.id, name: p.name, sequences: [...p.sequences, s]);
+    final next = Project(
+      id: p.id,
+      name: p.name,
+      sequences: [...p.sequences, s],
+      lastOpened: p.lastOpened,
+      favorite: p.favorite,
+    );
+    if (idx < 0) {
+      projects.add(next);
+    } else {
+      projects[idx] = next;
+    }
     await _saveProjects();
     return s;
   }
@@ -826,7 +903,11 @@ class DataRepository {
 
   Future<void> upsertProject(Project p) async {
     final idx = projects.indexWhere((x) => x.id == p.id);
-    if (idx >= 0) projects[idx] = p;
+    if (idx >= 0) {
+      projects[idx] = p;
+    } else {
+      projects.add(p);
+    }
     await _saveProjects();
   }
 

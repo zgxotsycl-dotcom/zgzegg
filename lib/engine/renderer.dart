@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart' show Colors;
@@ -226,7 +227,7 @@ class Renderer {
 
         case PrimType.image:
           final attTr = inst.attachmentTracks[a.id];
-          _drawImage(canvas, mat, a, attTr, t, images, tint: tint);
+          _drawImage(canvas, lmat, a, attTr, t, images, tint: tint);
           break;
       }
     }
@@ -376,6 +377,7 @@ class Renderer {
     final op = tr == null || tr.opacity.isEmpty ? 1.0 : sampleScalarD(tr.opacity, t).clamp(0.0, 1.0);
     final tintKey = tr == null || tr.tint.isEmpty ? const ui.Color(0xFFFFFFFF) : sampleColorI(tr.tint, t);
     final tintColor = tint ?? tintKey;
+    final rot = tr == null || tr.rotDeg.isEmpty ? 0.0 : sampleScalarD(tr.rotDeg, t);
 
     final m = mat.storage;
     final tmat = Float64List.fromList([
@@ -393,6 +395,12 @@ class Renderer {
     final cy = a.a.y + a.b.y / 2;
     final dst = ui.Rect.fromLTRB(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2);
     final src = ui.Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble());
+
+    if (rot.abs() > 1e-6) {
+      canvas.translate(cx, cy);
+      canvas.rotate(rot * math.pi / 180.0);
+      canvas.translate(-cx, -cy);
+    }
 
     final p = ui.Paint()
       ..filterQuality = ui.FilterQuality.high

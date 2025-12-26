@@ -3,7 +3,9 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as path;
 import 'package:provider/provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 import 'app.dart';
 import 'l10n/app_localizations.dart';
@@ -129,8 +131,9 @@ class _HomeScreenState extends State<HomeScreen> {
       body: LayoutBuilder(
         builder: (context, constraints) {
           final isWide = constraints.maxWidth >= 900;
+          final pad = constraints.maxWidth < 600 ? 16.0 : 24.0;
           return SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
+            padding: EdgeInsets.all(pad),
             child: Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 1080),
@@ -262,6 +265,87 @@ class _HomeScreenState extends State<HomeScreen> {
     final subtitle =
         '${project.sequences.length} sequences | Last opened: ${_formatLastOpened(project.lastOpened)}';
 
+    final actions = <Widget>[
+      if (project.sequences.isNotEmpty)
+        PopupMenuButton<int>(
+          tooltip: 'Open sequence',
+          icon: const Icon(Icons.playlist_play),
+          itemBuilder: (ctx) => project.sequences
+              .asMap()
+              .entries
+              .map(
+                (entry) => PopupMenuItem<int>(
+                  value: entry.key,
+                  child: Text(entry.value.name),
+                ),
+              )
+              .toList(),
+          onSelected: (index) {
+            final seq = project.sequences[index];
+            _openProject(project, sequence: seq);
+          },
+        ),
+      if (isWide)
+        IconButton(
+          tooltip: 'Manage sequences',
+          icon: const Icon(Icons.list_alt),
+          onPressed: () => _manageSequences(project),
+        ),
+      IconButton(
+        tooltip: 'Open project',
+        icon: const Icon(Icons.open_in_new),
+        onPressed: () => _openProject(project),
+      ),
+      IconButton(
+        tooltip: project.favorite ? 'Unpin from favorites' : 'Pin to favorites',
+        icon: Icon(project.favorite ? Icons.star : Icons.star_border),
+        onPressed: () => _toggleFavorite(project),
+      ),
+      if (isWide) ...[
+        IconButton(
+          tooltip: 'Export (.sma)',
+          icon: const Icon(Icons.ios_share),
+          onPressed: () => _exportProject(project),
+        ),
+        IconButton(
+          tooltip: 'Rename project',
+          icon: const Icon(Icons.drive_file_rename_outline),
+          onPressed: () => _renameProject(project),
+        ),
+        IconButton(
+          tooltip: 'Delete project',
+          icon: const Icon(Icons.delete_outline),
+          onPressed: () => _deleteProject(project),
+        ),
+      ] else
+        PopupMenuButton<String>(
+          tooltip: 'More',
+          icon: const Icon(Icons.more_vert),
+          onSelected: (v) async {
+            switch (v) {
+              case 'manage':
+                await _manageSequences(project);
+                break;
+              case 'export':
+                await _exportProject(project);
+                break;
+              case 'rename':
+                await _renameProject(project);
+                break;
+              case 'delete':
+                await _deleteProject(project);
+                break;
+            }
+          },
+          itemBuilder: (_) => const [
+            PopupMenuItem(value: 'manage', child: Text('Manage sequences')),
+            PopupMenuItem(value: 'export', child: Text('Export (.sma)')),
+            PopupMenuItem(value: 'rename', child: Text('Rename')),
+            PopupMenuItem(value: 'delete', child: Text('Delete')),
+          ],
+        ),
+    ];
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -282,57 +366,7 @@ class _HomeScreenState extends State<HomeScreen> {
               spacing: 8,
               overflowSpacing: 4,
               alignment: isWide ? MainAxisAlignment.start : MainAxisAlignment.center,
-              children: [
-                if (project.sequences.isNotEmpty)
-                  PopupMenuButton<int>(
-                    tooltip: 'Open sequence',
-                    icon: const Icon(Icons.playlist_play),
-                    itemBuilder: (ctx) => project.sequences
-                        .asMap()
-                        .entries
-                        .map(
-                          (entry) => PopupMenuItem<int>(
-                            value: entry.key,
-                            child: Text(entry.value.name),
-                          ),
-                        )
-                        .toList(),
-                    onSelected: (index) {
-                      final seq = project.sequences[index];
-                      _openProject(project, sequence: seq);
-                    },
-                  ),
-                IconButton(
-                  tooltip: 'Manage sequences',
-                  icon: const Icon(Icons.list_alt),
-                  onPressed: () => _manageSequences(project),
-                ),
-                IconButton(
-                  tooltip: 'Open project',
-                  icon: const Icon(Icons.open_in_new),
-                  onPressed: () => _openProject(project),
-                ),
-                IconButton(
-                  tooltip: project.favorite ? 'Unpin from favorites' : 'Pin to favorites',
-                  icon: Icon(project.favorite ? Icons.star : Icons.star_border),
-                  onPressed: () => _toggleFavorite(project),
-                ),
-                IconButton(
-                  tooltip: 'Export (.sma)',
-                  icon: const Icon(Icons.ios_share),
-                  onPressed: () => _exportProject(project),
-                ),
-                IconButton(
-                  tooltip: 'Rename project',
-                  icon: const Icon(Icons.drive_file_rename_outline),
-                  onPressed: () => _renameProject(project),
-                ),
-                IconButton(
-                  tooltip: 'Delete project',
-                  icon: const Icon(Icons.delete_outline),
-                  onPressed: () => _deleteProject(project),
-                ),
-              ],
+              children: actions,
             ),
           ],
         ),
@@ -484,14 +518,35 @@ class _HomeScreenState extends State<HomeScreen> {
     final repo = context.read<AppState>().repo;
     try {
       final bundle = await repo.exportBundle(project);
-      final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Save Animation File',
-        fileName: '${project.name}.sma',
-        type: FileType.custom,
-        allowedExtensions: const ['sma'],
-      );
+
+      if (Platform.isAndroid || Platform.isIOS) {
+        await Share.shareXFiles(
+          [XFile(bundle.path)],
+          subject: project.name,
+          text: 'Exported from BOKU Animator',
+        );
+        return;
+      }
+
+      String? savePath;
+      try {
+        savePath = await FilePicker.platform.saveFile(
+          dialogTitle: 'Save Animation File',
+          fileName: '${project.name}.sma',
+          type: FileType.custom,
+          allowedExtensions: const ['sma'],
+        );
+      } catch (_) {
+        await Share.shareXFiles(
+          [XFile(bundle.path)],
+          subject: project.name,
+          text: 'Exported from BOKU Animator',
+        );
+        return;
+      }
+
       if (savePath == null) return;
-      await File(bundle.path).copy(savePath);
+      await bundle.copy(savePath);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('${AppLocalizations.of(context).t('export.bundle_exported')} $savePath')),
@@ -508,34 +563,56 @@ class _HomeScreenState extends State<HomeScreen> {
     _dismissTransientUI();
     final repo = context.read<AppState>().repo;
     final result = await FilePicker.platform.pickFiles(
+      withData: Platform.isAndroid || Platform.isIOS,
       type: FileType.custom,
       allowedExtensions: const ['sma', 'zip'],
     );
     if (result == null || result.files.isEmpty) return;
-    final picked = result.files.single.path;
-    if (picked == null) return;
+    final pickedFile = result.files.single;
+
+    File? src;
+    File? tmp;
+    if (pickedFile.path != null) {
+      src = File(pickedFile.path!);
+    } else if (pickedFile.bytes != null) {
+      final ext = path.extension(pickedFile.name);
+      final tmpPath = path.join(
+        Directory.systemTemp.path,
+        'bokuanimator_import_${DateTime.now().millisecondsSinceEpoch}${ext.isEmpty ? '.sma' : ext}',
+      );
+      tmp = File(tmpPath);
+      await tmp.writeAsBytes(pickedFile.bytes!, flush: true);
+      src = tmp;
+    }
+    if (src == null) return;
 
     try {
-      final project = await repo.importBundle(File(picked));
+      final project = await repo.importBundle(src);
       final sequence = project.sequences.isNotEmpty
           ? project.sequences.first
           : await repo.createSequence(project, 'Scene 1');
       await repo.markProjectOpened(project);
       if (!mounted) return;
-    Navigator.of(context, rootNavigator: true).push(
-      MaterialPageRoute(
-        builder: (_) => AnimationEditorScreen(
-          project: project,
-          sequence: sequence,
+      Navigator.of(context, rootNavigator: true).push(
+        MaterialPageRoute(
+          builder: (_) => AnimationEditorScreen(
+            project: project,
+            sequence: sequence,
+          ),
         ),
-      ),
-    );
+      );
       _refresh();
     } catch (err) {
       if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('${AppLocalizations.of(context).t('file.open_failed')} $err')),
-    );
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${AppLocalizations.of(context).t('file.open_failed')} $err')),
+      );
+    } finally {
+      try {
+        if (tmp != null && await tmp.exists()) {
+          await tmp.delete();
+        }
+      } catch (_) {}
     }
   }
 

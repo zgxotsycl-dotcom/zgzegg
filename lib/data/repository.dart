@@ -466,6 +466,8 @@ class DataRepository {
               opacity: fixDouble(track.opacity),
               tint: fixInt(track.tint),
               frameIndex: fixDouble(track.frameIndex),
+              offset: fixVec2(track.offset),
+              rotDeg: fixDouble(track.rotDeg),
             );
             migratedAttachments[attachmentId] = fixedTrack;
             for (final key in fixedTrack.scale) {
@@ -484,6 +486,16 @@ class DataRepository {
               }
             }
             for (final key in fixedTrack.frameIndex) {
+              if (key.t > lastFrame) {
+                lastFrame = key.t;
+              }
+            }
+            for (final key in fixedTrack.offset) {
+              if (key.t > lastFrame) {
+                lastFrame = key.t;
+              }
+            }
+            for (final key in fixedTrack.rotDeg) {
               if (key.t > lastFrame) {
                 lastFrame = key.t;
               }
@@ -579,6 +591,11 @@ class DataRepository {
             .toList(),
       };
 
+  double _defaultHitTolerancePx() {
+    if (Platform.isAndroid || Platform.isIOS) return 60.0;
+    return 40.0;
+  }
+
   Sequence _sequenceFromJson(Map<String, dynamic> j) {
     final settingJson = (j['setting'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
 
@@ -613,7 +630,7 @@ class DataRepository {
         backgroundColor: backgroundColor,
         backgroundImage: backgroundImage,
         previewDownscale: (settingJson['previewDownscale'] as num?)?.toDouble() ?? 0.7,
-        hitTolerancePx: (settingJson['hitTolerancePx'] as num?)?.toDouble() ?? 32.0,
+        hitTolerancePx: (settingJson['hitTolerancePx'] as num?)?.toDouble() ?? _defaultHitTolerancePx(),
         enforceLengthLock: (settingJson['enforceLengthLock'] as bool?) ?? true,
         anchorWriteOnEdit: (settingJson['anchorWriteOnEdit'] as bool?) ?? true,
         smartIkPriority: (settingJson['smartIkPriority'] as bool?) ?? true,
@@ -664,7 +681,20 @@ class DataRepository {
         if (i.tags.isNotEmpty) 'tags': i.tags,
         'ikPoles': i.ikPoles.map((k,v)=> MapEntry(k, v.toJson())),
         'boneTracks': i.boneTracks.map((k, v) => MapEntry(k, _trackToJson(v))),
-        'attachmentTracks': i.attachmentTracks.map((k, v) => MapEntry(k, { 'scale': v.scale.map((e) => {'t': e.t, 'v': e.v.toJson(), 'e': e.easing?.type}).toList(), 'opacity': v.opacity.map((e) => {'t': e.t, 'v': e.v, 'e': e.easing?.type}).toList(), 'tint': v.tint.map((e) => {'t': e.t, 'v': e.v, 'e': e.easing?.type}).toList(), 'frame': v.frameIndex.map((e) => {'t': e.t, 'v': e.v, 'e': e.easing?.type}).toList(), 'offset': v.offset.map((e) => {'t': e.t, 'v': e.v.toJson(), 'e': e.easing?.type}).toList(), })), 'anchorTracks': i.anchorTracks.map((k, list) => MapEntry(k, list.map((e)=> {'t': e.t, 'v': e.v.toJson()}).toList())),
+        'attachmentTracks': i.attachmentTracks.map(
+          (k, v) => MapEntry(
+            k,
+            {
+              'scale': v.scale.map((e) => {'t': e.t, 'v': e.v.toJson(), 'e': e.easing?.type}).toList(),
+              'opacity': v.opacity.map((e) => {'t': e.t, 'v': e.v, 'e': e.easing?.type}).toList(),
+              'tint': v.tint.map((e) => {'t': e.t, 'v': e.v, 'e': e.easing?.type}).toList(),
+              'frame': v.frameIndex.map((e) => {'t': e.t, 'v': e.v, 'e': e.easing?.type}).toList(),
+              'offset': v.offset.map((e) => {'t': e.t, 'v': e.v.toJson(), 'e': e.easing?.type}).toList(),
+              'rotDeg': v.rotDeg.map((e) => {'t': e.t, 'v': e.v, 'e': e.easing?.type}).toList(),
+            },
+          ),
+        ),
+        'anchorTracks': i.anchorTracks.map((k, list) => MapEntry(k, list.map((e)=> {'t': e.t, 'v': e.v.toJson()}).toList())),
       };
 
   Instance _instanceFromJson(Map<String, dynamic> j) {
@@ -678,7 +708,8 @@ class DataRepository {
         final ti = (v['tint'] as List? ?? []).map((e) => KeyF<int>(e['t'], e['v'] as int, easing: e['e'] != null ? Easing(e['e']) : null)).toList();
         final fr = (v['frame'] as List? ?? []).map((e) => KeyF<double>(e['t'], (e['v'] as num).toDouble(), easing: e['e'] != null ? Easing(e['e']) : null)).toList();
         final of = (v['offset'] as List? ?? []).map((e) => KeyF<Vec2>(e['t'], Vec2.fromJson(e['v']), easing: e['e'] != null ? Easing(e['e']) : null)).toList();
-        at[entry.key] = AttTrack(scale: sc, opacity: op, tint: ti, frameIndex: fr, offset: of);
+        final rd = (v['rotDeg'] as List? ?? []).map((e) => KeyF<double>(e['t'], (e['v'] as num).toDouble(), easing: e['e'] != null ? Easing(e['e']) : null)).toList();
+        at[entry.key] = AttTrack(scale: sc, opacity: op, tint: ti, frameIndex: fr, offset: of, rotDeg: rd);
       }
     }
     final poles = <String, Vec2>{};
@@ -814,6 +845,26 @@ class DataRepository {
     return m;
   }
 
+  Future<Model> createImageModelFromBytes(
+    Uint8List bytes, {
+    String name = 'Image',
+    String ext = '.png',
+  }) async {
+    final safeExt = ext.trim().isEmpty ? '.png' : (ext.startsWith('.') ? ext : '.$ext');
+    final stored = await addImageBytes(bytes, ext: safeExt);
+    final img = images[stored];
+    final w = (img?.width ?? 256).toDouble();
+    final h = (img?.height ?? 256).toDouble();
+    final m = Model(
+      id: _uuid.v4(),
+      name: name,
+      bones: const [Bone(id: 'root', parentId: null, pivot: Vec2(0, 0), bind: Transform2D())],
+      attachments: [Attachment(id: 'img', boneId: 'root', type: PrimType.image, a: const Vec2(0, 0), b: Vec2(w, h), imagePath: stored)],
+    );
+    await saveUserModel(m);
+    return m;
+  }
+
   Future<Model> createSpriteModel(List<String> paths) async {
     if (paths.isEmpty) throw Exception('이미지가 없습니다');
     final stored = <String>[];
@@ -826,6 +877,30 @@ class DataRepository {
     final m = Model(
       id: _uuid.v4(),
       name: 'Sprite ${path.basename(paths.first)}(${paths.length})',
+      bones: const [Bone(id: 'root', parentId: null, pivot: Vec2(0, 0), bind: Transform2D())],
+      attachments: [Attachment(id: 'sprite', boneId: 'root', type: PrimType.image, a: const Vec2(0, 0), b: Vec2(w, h), imagePath: stored.first, spriteFrames: stored)],
+    );
+    await saveUserModel(m);
+    return m;
+  }
+
+  Future<Model> createSpriteModelFromBytes(
+    List<Uint8List> frames, {
+    String name = 'Sprite',
+    String ext = '.png',
+  }) async {
+    if (frames.isEmpty) throw Exception('이미지가 없습니다');
+    final safeExt = ext.trim().isEmpty ? '.png' : (ext.startsWith('.') ? ext : '.$ext');
+    final stored = <String>[];
+    for (final b in frames) {
+      stored.add(await addImageBytes(b, ext: safeExt));
+    }
+    final img = images[stored.first];
+    final w = (img?.width ?? 128).toDouble();
+    final h = (img?.height ?? 128).toDouble();
+    final m = Model(
+      id: _uuid.v4(),
+      name: '$name(${stored.length})',
       bones: const [Bone(id: 'root', parentId: null, pivot: Vec2(0, 0), bind: Transform2D())],
       attachments: [Attachment(id: 'sprite', boneId: 'root', type: PrimType.image, a: const Vec2(0, 0), b: Vec2(w, h), imagePath: stored.first, spriteFrames: stored)],
     );
@@ -846,7 +921,10 @@ class DataRepository {
   }
 
   Future<Sequence> createSequenceWithSetting(Project p, String name, SequenceSetting setting) async {
-    final s = Sequence(id: _uuid.v4(), name: name, setting: setting, onion: const OnionSkinSetting(), instances: [], audio: const []);
+    final adjustedSetting = (Platform.isAndroid || Platform.isIOS) && setting.hitTolerancePx == 40.0
+        ? setting.copyWith(hitTolerancePx: _defaultHitTolerancePx())
+        : setting;
+    final s = Sequence(id: _uuid.v4(), name: name, setting: adjustedSetting, onion: const OnionSkinSetting(), instances: [], audio: const []);
     final idx = projects.indexWhere((x) => x.id == p.id);
     final next = Project(
       id: p.id,

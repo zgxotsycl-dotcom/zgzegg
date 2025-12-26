@@ -53,7 +53,16 @@ class AttTrack {
   final List<KeyF<double>> frameIndex;
   // Local offset in attachment's bone-local space (for fine-tuning positions)
   final List<KeyF<Vec2>> offset;
-  const AttTrack({this.scale = const [], this.opacity = const [], this.tint = const [], this.frameIndex = const [], this.offset = const []});
+  // Local rotation in degrees (applied around attachment center)
+  final List<KeyF<double>> rotDeg;
+  const AttTrack({
+    this.scale = const [],
+    this.opacity = const [],
+    this.tint = const [],
+    this.frameIndex = const [],
+    this.offset = const [],
+    this.rotDeg = const [],
+  });
 }
 
 enum PrimType { circle, rect, line, path, image }

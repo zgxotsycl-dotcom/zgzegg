@@ -62,17 +62,19 @@ void main() {
     final layersBtn = find.ancestor(of: layersIcon, matching: find.byType(IconButton));
     await tester.tap(layersBtn);
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
 
     final layers0 = find.text('Layers (0)');
     await _pumpUntilFound(tester, layers0);
 
     // Add a stickman layer.
-    final addLayerBtn = find.byWidgetPredicate((w) => w is IconButton && w.tooltip == 'Add layer');
-    await tester.tap(addLayerBtn);
+    await tester.tap(find.byTooltip('Add'));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
 
     await _pumpUntilFound(tester, find.text('Stickman'));
-    await tester.tap(find.text('Stickman'));
+    final stickmanTile = find.ancestor(of: find.text('Stickman'), matching: find.byType(ListTile));
+    await tester.tap(stickmanTile);
     await tester.pump();
 
     final layers1 = find.text('Layers (1)');
